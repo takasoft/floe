@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "floe"
+version = "0.1.0"
+description = "Cloud-agnostic event-driven declarative lakehouse engine built on Apache Iceberg"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "takasoft" }]
+keywords = ["iceberg", "lakehouse", "streaming", "data", "pipeline"]
+dependencies = [
+    "pyiceberg[sql-sqlite,pyarrow]>=0.7.0",
+    "duckdb>=1.0.0",
+    "pyarrow>=15.0.0",
+    "sqlglot>=25.0.0",
+    "networkx>=3.2",
+    "typer>=0.12.0",
+    "pydantic>=2.5.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+    "tzdata>=2024.1; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+floe = "floe.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/floe"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]

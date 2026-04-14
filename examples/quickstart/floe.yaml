@@ -1,0 +1,17 @@
+project: quickstart
+version: "1.0"
+
+catalog:
+  type: sql
+  uri: sqlite:///./.floe/catalog.db
+  warehouse: ./warehouse
+
+compute:
+  engine: duckdb
+
+defaults:
+  lag: "5 minutes"
+  refresh_mode: INCREMENTAL
+  lineage: true
+
+transformations_dir: transformations
