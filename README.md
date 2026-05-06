@@ -30,13 +30,11 @@ CREATE DYNAMIC TABLE silver.orders
 - **Data as State** — the data itself is the source of truth; no external state stores
 - **Built-in DQ** — preconditions, quarantine routing, and automatic lineage injection on every write
 
-> **Status:** Early design phase.
-
 ---
 
 ## Table of Contents
 
-1. [Problem Statement](#1-problem-statement)
+1. [The Problem](#1-the-problem)
 2. [Inspiration: Snowflake's Architecture](#2-inspiration-snowflakes-architecture)
 3. [Core Concepts](#3-core-concepts)
 4. [Architecture Overview](#4-architecture-overview)
@@ -50,23 +48,52 @@ CREATE DYNAMIC TABLE silver.orders
 
 ---
 
-## 1. Problem Statement
+## 1. The Problem
 
-### 1.1 The Custom Orchestration Trap
+### 1.1 A pipeline that should be simple
 
-Most data teams eventually build a custom orchestration layer: a service that polls sources, tracks what has been processed, resolves dependencies, and triggers downstream jobs. This pattern consistently fails at scale for the same reasons:
+You build a delivery analytics pipeline. Two source tables — `bronze.deliveries` (every package delivered) and `bronze.delivery_defects` (damage reports, customer complaints, contractual SLA breaches) — both partitioned by `delivery_date`. You build a `gold.delivery_quality_daily` table that joins them to compute the daily defect rate per region.
 
-- Dependency logic becomes hardcoded into a stateful service
-- State is stored externally (DynamoDB, Redis, S3 path conventions) and drifts from reality
-- The service becomes a single point of failure for all pipelines
-- Operational burden grows linearly with the number of pipelines
-- Local testing is impossible without replicating the full orchestration environment
+Simple, until you understand how the data actually behaves:
 
-The trap is not a bad engineer — it is the absence of a platform that makes the right pattern the easy pattern.
+- **Delivery events** show up within minutes of the package being delivered.
+- **Defect reports** trickle in for days afterward. A delivery on April 22 might have a customer complaint filed on April 27, a contractual review filed on May 1, and a chargeback filed on May 5.
 
-### 1.2 The Gap in the Open-Source Ecosystem
+Your `gold.delivery_quality_daily` partition for April 22 is *wrong* on April 23, *less wrong* on April 24, and *roughly correct* by May 5. Each old partition needs to be **revisited** as late-arriving defects show up.
 
-The streaming lakehouse ecosystem is maturing rapidly, but a clear gap remains:
+### 1.2 The freshness requirement that won't fit in cron
+
+You write down the SLA your stakeholders actually want:
+
+> *Every partition for the last 14 days must have been recomputed within 2 days of that partition's date.*
+
+So today's partition needs a refresh today or yesterday. Last week's partition needs a refresh from this week. The partition from 14 days ago is allowed to be a little older. Older than 14 days, you don't care — that data is now stable.
+
+This is a **sliding-window freshness contract**, and no single cron schedule can express it. You can run a job daily that rewrites the last 14 partitions, but then every question about "is this fresh enough?" lives in your head, not in the system.
+
+### 1.3 The dilemmas nobody likes
+
+You write the daily job. Then the operational questions start:
+
+- **Upstream isn't ready yet.** `bronze.delivery_defects` hasn't refreshed today. Do you wait? Wait how long? At what point do you give up and run with stale upstream data?
+- **Or do you trigger upstream?** If you can re-run the upstream pipeline yourself, do you do it on every run? You're now coupling pipelines that were supposed to be independent — and you've just rebuilt a fragile orchestration layer.
+- **Late arrivals outside the window.** A defect lands for January 12 — a partition from four months ago, well outside your 14-day window. Do you refresh it? Your job ignores anything older.
+- **Backfills.** A bug is fixed. You need to recompute 90 partitions correctly. Your daily-cron design has no answer for this; you write a one-off script, run it manually, hope nobody else's pipeline is reading mid-write.
+- **Partial dependencies.** Today's `gold` partition only needs today's `bronze` data. But your job re-reads all 14 days of upstream because there's no easy way to express "only this partition depends on that partition."
+
+You patch each one. You add sensors. You add YAML dependency configs. You add manual override flags. Six months later your "platform" is a 50K-line Python service that nobody but you can extend without breaking. **This is the trap. Every data team falls in.** The fix is always more orchestration code, and that code becomes the most fragile thing in your stack.
+
+### 1.4 What if the data drove its own refresh?
+
+Floe is what happens when you stop scheduling and let the **data** trigger the work.
+
+A new partition lands in `bronze.delivery_defects`? The corresponding `gold.delivery_quality_daily` partition is automatically marked stale and refreshed. A late-arriving defect for January 12? The January 12 gold partition refreshes — same code path, no special handling. A backfill? You replay the upstream snapshots; everything downstream catches up automatically. You write the SQL once, declare the freshness target, and Floe figures out the rest.
+
+There is no scheduling. There is no "is the upstream fresh enough" decision in your code. The DAG knows.
+
+### 1.5 What's missing in open source
+
+Streaming-native lakehouses are a maturing space, but no project hits all five must-haves:
 
 | Project | Event-Driven | Iceberg-Native | Dynamic Table DAG | Cloud-Agnostic | Local Mode |
 |---------|:---:|:---:|:---:|:---:|:---:|
@@ -79,11 +106,15 @@ The streaming lakehouse ecosystem is maturing rapidly, but a clear gap remains:
 
 No existing open-source project combines all five. Floe fills this gap.
 
-### 1.3 What Floe Is Not
+### 1.6 What Floe is and isn't
 
-- **Not a query engine.** Floe does not serve interactive SQL queries. Use Trino, DuckDB, or Spark SQL to read Floe-managed Iceberg tables.
-- **Not a data catalog UI.** Use Apache Polaris, Project Nessie, or your cloud provider's catalog.
-- **Not a replacement for Kafka/Flink.** Floe is a coordination and declaration layer that orchestrates Flink jobs. It does not replace the underlying compute.
+Floe **is** a coordination layer for declarative pipelines on Apache Iceberg. You declare your transformations and freshness targets; Floe handles dependency resolution, incremental refresh, lineage, and data quality routing.
+
+Floe **is not**:
+
+- **A query engine.** Floe does not serve interactive SQL queries. Use Trino, DuckDB, or Spark SQL to read Floe-managed Iceberg tables.
+- **A data catalog UI.** Use Apache Polaris, Project Nessie, or your cloud provider's catalog.
+- **A replacement for Kafka/Flink.** Floe is a coordination and declaration layer that orchestrates Flink jobs — it does not replace the underlying compute.
 
 ---
 
