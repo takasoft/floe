@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class RefreshMode(str, Enum):
@@ -24,6 +24,40 @@ class DynamicTable(BaseModel):
     refresh_mode: RefreshMode = Field(default=RefreshMode.INCREMENTAL)
     upstream_tables: list[str] = Field(default_factory=list)
     source_path: str | None = Field(default=None, description="Path to the .sql file defining this DIT")
+
+    # Partition-aware freshness (optional)
+    partition_by: list[str] = Field(
+        default_factory=list,
+        description="Identity partition columns (single col supported in MVP)",
+    )
+    partition_freshness: str | None = Field(
+        default=None,
+        description="Max age of in-scope partitions (e.g., '2 days'). None = inherit table-level lag.",
+    )
+    partition_window: str | None = Field(
+        default=None,
+        description="How far back partitions are kept fresh (e.g., '14 days'). None = whole table.",
+    )
+
+    @field_validator("partition_by")
+    @classmethod
+    def _single_partition_col(cls, v: list[str]) -> list[str]:
+        if len(v) > 1:
+            raise ValueError(
+                "MVP supports a single identity partition column; "
+                f"got {len(v)}: {v!r}"
+            )
+        return v
+
+    @property
+    def is_partitioned(self) -> bool:
+        return len(self.partition_by) > 0
+
+    def partition_freshness_seconds(self) -> int | None:
+        return _parse_lag(self.partition_freshness) if self.partition_freshness else None
+
+    def partition_window_seconds(self) -> int | None:
+        return _parse_lag(self.partition_window) if self.partition_window else None
 
     @property
     def namespace(self) -> str:

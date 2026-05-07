@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pyarrow as pa
@@ -9,9 +10,11 @@ from pyiceberg.catalog import Catalog, load_catalog
 from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
 from pyiceberg.schema import Schema
 from pyiceberg.table import Table
+from pyiceberg.transforms import IdentityTransform
 
 CHECKPOINT_PROPERTY = "floe.last_processed_snapshot_id"
 SOURCE_TABLE_PROPERTY = "floe.source_table"
+WINDOW_REFRESHED_AT_PROPERTY = "floe.window_last_refreshed_at"
 
 
 class CatalogManager:
@@ -75,6 +78,26 @@ class CatalogManager:
         except NoSuchTableError:
             return self._catalog.create_table(name, schema=schema)
 
+    def create_partitioned_table(
+        self,
+        name: str,
+        arrow_schema: pa.Schema,
+        partition_columns: list[str],
+    ) -> Table:
+        """Create an Iceberg table with identity partitioning on the given columns.
+
+        Implementation: create the table unpartitioned first (so PyIceberg
+        assigns fresh field IDs), then evolve the partition spec via
+        ``update_spec``. Avoids manual field-ID juggling.
+        """
+        namespace = name.rsplit(".", 1)[0] if "." in name else "default"
+        self.ensure_namespace(namespace)
+        table = self._catalog.create_table(name, schema=arrow_schema)
+        with table.update_spec() as update:
+            for col in partition_columns:
+                update.add_field(col, IdentityTransform(), col)
+        return self._catalog.load_table(name)
+
     def append(self, name: str, data: pa.Table) -> Table:
         table = self._catalog.load_table(name)
         table.append(data)
@@ -104,6 +127,29 @@ class CatalogManager:
         table = self._catalog.load_table(name)
         with table.transaction() as txn:
             txn.set_properties({CHECKPOINT_PROPERTY: str(snapshot_id)})
+
+    def get_window_refreshed_at(self, name: str) -> datetime | None:
+        table = self._catalog.load_table(name)
+        val = table.properties.get(WINDOW_REFRESHED_AT_PROPERTY)
+        if not val:
+            return None
+        try:
+            return datetime.fromisoformat(val)
+        except ValueError:
+            return None
+
+    def set_window_refreshed_at(self, name: str, ts: datetime) -> None:
+        table = self._catalog.load_table(name)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        with table.transaction() as txn:
+            txn.set_properties({WINDOW_REFRESHED_AT_PROPERTY: ts.isoformat()})
+
+    def overwrite_with_filter(self, name: str, data: pa.Table, filter_expr) -> Table:
+        """Replace rows matching `filter_expr` with `data` (partition-aware overwrite)."""
+        table = self._catalog.load_table(name)
+        table.overwrite(data, overwrite_filter=filter_expr)
+        return self._catalog.load_table(name)
 
     def list_tables(self, namespace: str) -> list[str]:
         try:

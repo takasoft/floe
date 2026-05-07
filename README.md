@@ -198,7 +198,41 @@ CREATE DYNAMIC TABLE silver.orders
 
 Floe automatically degrades to `FULL` if the DAG Planner determines `INCREMENTAL` is not safe for the given query.
 
-### 3.3 The Precondition (Sensor Pattern)
+### 3.3 Partition-Aware Freshness
+
+A single `LAG` value is fine for tables that are always rewritten as a whole, but most production pipelines have a more nuanced freshness contract:
+
+> *"Every partition for the last N days must have been recomputed within X of right now."*
+
+This pattern shows up everywhere — financial close cycles, regulatory reporting windows, late-arriving event corrections, slowly-stabilizing aggregates. Floe expresses it directly:
+
+```sql
+CREATE DYNAMIC TABLE gold.delivery_quality_daily
+  PARTITION BY (delivery_date)
+  PARTITION_WINDOW = '14 days'        -- how far back to keep fresh
+  PARTITION_FRESHNESS = '2 days'      -- max staleness within the window
+  REFRESH_MODE = 'INCREMENTAL'
+  AS
+  SELECT
+    d.delivery_date, d.region, d.station_id,
+    COUNT(*) AS total_deliveries,
+    COUNT(f.defect_id) AS defect_count,
+    ROUND(100.0 * COUNT(f.defect_id) / COUNT(*), 2) AS defect_rate_pct
+  FROM silver.deliveries_enriched d
+  LEFT JOIN bronze.delivery_defects f USING (delivery_id)
+  GROUP BY d.delivery_date, d.region, d.station_id;
+```
+
+Behavior:
+
+- **Window** — at refresh time, only rows where `delivery_date >= today - 14 days` are computed and written. Partitions outside the window are never touched by Floe and remain at whatever value they had at last refresh.
+- **Freshness** — a refresh fires when EITHER upstream changes OR `now() - last_refresh > 2 days`. The freshness clock guarantees the SLA is met even if upstream is quiet.
+- **Atomic partition replacement** — in-window partitions are overwritten in a single Iceberg commit using a `partition_col >= cutoff` filter. Older partitions are not part of the transaction.
+- **Late arrivals are free** — when a defect is filed today against a 7-day-old delivery, the next refresh of the 14-day window picks it up. No backfill script, no special-case handling.
+
+The output table is created with an Iceberg identity partition spec on the declared columns, so partition pruning works for any downstream reader (Trino, Spark, DuckDB).
+
+### 3.4 The Precondition (Sensor Pattern)
 
 A precondition is a data readiness assertion that must pass before a refresh executes. If a precondition fails, the refresh exits cleanly (no error, no partial write) and retries on the next event.
 
@@ -227,7 +261,7 @@ CREATE DYNAMIC TABLE gold.weekly_scorecard
   GROUP BY week, da_id;
 ```
 
-### 3.4 Data Quality Routing (Quarantine Pattern)
+### 3.5 Data Quality Routing (Quarantine Pattern)
 
 Rather than crashing on bad data or silently dropping rows, Floe routes DQ-failed rows to a companion quarantine table. The production table only receives rows that pass all DQ checks.
 
@@ -246,7 +280,7 @@ CREATE DYNAMIC TABLE silver.payments
 
 The quarantine table is a regular Iceberg table with an additional `_floe_dq_failure_reason` column. An alert fires if the quarantine write rate exceeds a configured threshold.
 
-### 3.5 Automatic Snapshot Lineage
+### 3.6 Automatic Snapshot Lineage
 
 Every DIT write automatically injects lineage metadata columns. These are non-optional — they are how Floe guarantees auditability for payment-impacting and compliance-sensitive data.
 
@@ -270,7 +304,7 @@ FOR VERSION AS OF 8029341234
 WHERE payment_id = 'pay_abc123';
 ```
 
-### 3.6 The DAG
+### 3.7 The DAG
 
 Floe parses all DIT definitions in a project and builds a directed acyclic graph of table dependencies. This DAG drives:
 
@@ -494,7 +528,10 @@ Full DIT definition syntax:
 
 ```sql
 CREATE DYNAMIC TABLE <catalog>.<database>.<table>
+  [ PARTITION BY (<col>[, <col>]*) ]
   [ LAG = '<duration>' ]
+  [ PARTITION_WINDOW = '<duration>' ]
+  [ PARTITION_FRESHNESS = '<duration>' ]
   [ REFRESH_MODE = INCREMENTAL | FULL | TRIGGERED | SCHEDULED '<cron>' ]
   [ PRECONDITIONS (
       <precondition_function>(...) [, ...]
@@ -507,6 +544,12 @@ CREATE DYNAMIC TABLE <catalog>.<database>.<table>
   AS
   <select_statement>;
 ```
+
+Partition-aware options:
+
+- `PARTITION BY (col)` — output table is created with Iceberg identity partitioning on these columns
+- `PARTITION_WINDOW` — partitions older than `today - <duration>` are excluded from refresh; previous values are preserved
+- `PARTITION_FRESHNESS` — maximum staleness for in-window partitions; a refresh fires if upstream changes OR if this deadline lapses
 
 ### 6.4 Python SDK
 
@@ -719,6 +762,7 @@ Building the same system yourself requires writing Flink jobs per transformation
 - [ ] Flink compute backend
 - [ ] Local deployment (Docker Compose + MinIO + NATS + Iceberg REST)
 - [ ] `INCREMENTAL` and `FULL` refresh modes
+- [ ] Partition-aware refresh (`PARTITION BY` + `PARTITION_WINDOW` + `PARTITION_FRESHNESS`)
 - [ ] Automatic `_floe_*` lineage column injection
 - [ ] CLI: `init`, `apply`, `plan`, `status`, `refresh`
 

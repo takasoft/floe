@@ -9,7 +9,6 @@ import pyarrow as pa
 from floe.catalog import CatalogManager
 from floe.executor import strip_lineage_columns
 from floe.lineage import LINEAGE_COLUMNS
-from floe.parser import parse_dit_sql
 from floe.pipeline import Pipeline
 
 
@@ -153,6 +152,155 @@ def test_multi_hop_dag(project_dir, floe_config, catalog_mgr, sample_orders, sam
     rows = {r["region"]: r["total"] for r in logical.to_pylist()}
     assert rows["us-east"] == 17.75  # orders 1 (10.5) + 3 (7.25)
     assert rows["us-west"] == 25.0   # order 2
+
+
+def test_partitioned_refresh_window(project_dir, floe_config, catalog_mgr):
+    """Partitioned DIT with WINDOW only writes in-window partitions."""
+    from datetime import datetime, timedelta, timezone
+
+    today = datetime.now(timezone.utc).date()
+
+    # Bronze: events spanning 30 days. Window is 14 days, so only 14 partitions stay fresh.
+    rows = []
+    for i in range(30):
+        d = today - timedelta(days=i)
+        rows.append({"event_date": d, "value": i})
+    bronze = pa.table({
+        "event_date": pa.array([r["event_date"] for r in rows], type=pa.date32()),
+        "value":      pa.array([r["value"] for r in rows], type=pa.int64()),
+    })
+
+    catalog_mgr.ensure_namespace("bronze")
+    bt = catalog_mgr.catalog.create_table("bronze.events", schema=bronze.schema)
+    bt.append(bronze)
+
+    _write_dit_file(
+        project_dir / "transformations",
+        "gold_daily",
+        """
+        CREATE DYNAMIC TABLE gold.daily
+          PARTITION BY (event_date)
+          PARTITION_WINDOW = '14 days'
+          REFRESH_MODE = 'INCREMENTAL'
+          AS
+          SELECT event_date, sum(value) AS total
+          FROM bronze.events
+          GROUP BY event_date;
+        """,
+    )
+
+    from floe.parser import load_dits
+    dits = load_dits(project_dir / "transformations")
+    pipeline = Pipeline(floe_config, dits, catalog_mgr)
+
+    [r] = pipeline.refresh_all()
+    assert not r.skipped
+    assert r.rows_written == 15  # 14 days back + today inclusive
+
+    out = catalog_mgr.load_table("gold.daily").scan().to_arrow()
+    out_dates = sorted({d for d in out["event_date"].to_pylist()})
+    cutoff = today - timedelta(days=14)
+    assert min(out_dates) == cutoff
+    assert max(out_dates) == today
+
+
+def test_partitioned_refresh_skip_when_fresh(project_dir, floe_config, catalog_mgr):
+    """A partitioned DIT skips when upstream is unchanged AND window is fresh."""
+    from datetime import datetime, timedelta, timezone
+
+    today = datetime.now(timezone.utc).date()
+    bronze = pa.table({
+        "event_date": pa.array([today, today - timedelta(days=1)], type=pa.date32()),
+        "value":      pa.array([1, 2], type=pa.int64()),
+    })
+
+    catalog_mgr.ensure_namespace("bronze")
+    catalog_mgr.catalog.create_table("bronze.events", schema=bronze.schema).append(bronze)
+
+    _write_dit_file(
+        project_dir / "transformations",
+        "gold_daily",
+        """
+        CREATE DYNAMIC TABLE gold.daily
+          PARTITION BY (event_date)
+          PARTITION_WINDOW = '7 days'
+          PARTITION_FRESHNESS = '1 hour'
+          AS
+          SELECT event_date, sum(value) AS total FROM bronze.events GROUP BY event_date;
+        """,
+    )
+
+    from floe.parser import load_dits
+    dits = load_dits(project_dir / "transformations")
+    pipeline = Pipeline(floe_config, dits, catalog_mgr)
+
+    first = pipeline.refresh_all()[0]
+    assert not first.skipped
+
+    # No upstream change AND we just refreshed (well within 1 hour) → skip.
+    second = pipeline.refresh_all()[0]
+    assert second.skipped
+    assert "unchanged" in second.skip_reason
+
+
+def test_partitioned_refresh_replaces_only_in_window(project_dir, floe_config, catalog_mgr):
+    """An older out-of-window partition written by hand is left untouched by refresh."""
+    from datetime import datetime, timedelta, timezone
+
+    today = datetime.now(timezone.utc).date()
+
+    # Bronze has only recent data (last 3 days).
+    bronze = pa.table({
+        "event_date": pa.array(
+            [today, today - timedelta(days=1), today - timedelta(days=2)], type=pa.date32()
+        ),
+        "value": pa.array([10, 20, 30], type=pa.int64()),
+    })
+    catalog_mgr.ensure_namespace("bronze")
+    catalog_mgr.catalog.create_table("bronze.events", schema=bronze.schema).append(bronze)
+
+    _write_dit_file(
+        project_dir / "transformations",
+        "gold_daily",
+        """
+        CREATE DYNAMIC TABLE gold.daily
+          PARTITION BY (event_date)
+          PARTITION_WINDOW = '5 days'
+          AS SELECT event_date, CAST(sum(value) AS BIGINT) AS total
+             FROM bronze.events GROUP BY event_date;
+        """,
+    )
+
+    from floe.parser import load_dits
+    dits = load_dits(project_dir / "transformations")
+    pipeline = Pipeline(floe_config, dits, catalog_mgr)
+    pipeline.refresh_all()
+
+    # Manually append a row OUTSIDE the 5-day window — simulating a backfill or older data.
+    old_date = today - timedelta(days=20)
+    out_of_window = pa.table({
+        "event_date":              pa.array([old_date], type=pa.date32()),
+        "total":                   pa.array([999], type=pa.int64()),
+        "_floe_input_snapshot_id": pa.array([0], type=pa.int64()),
+        "_floe_job_run_id":        pa.array(["manual"], type=pa.string()),
+        "_floe_processed_at":      pa.array(
+            [datetime.now(timezone.utc)], type=pa.timestamp("us", tz="UTC")
+        ),
+        "_floe_refresh_mode":      pa.array(["MANUAL"], type=pa.string()),
+    })
+    catalog_mgr.load_table("gold.daily").append(out_of_window)
+
+    # Bump bronze so a refresh fires
+    catalog_mgr.append("bronze.events", pa.table({
+        "event_date": pa.array([today], type=pa.date32()),
+        "value":      pa.array([5], type=pa.int64()),
+    }))
+
+    pipeline.refresh_all()
+
+    out = catalog_mgr.load_table("gold.daily").scan().to_arrow()
+    dates = set(out["event_date"].to_pylist())
+    assert old_date in dates, "old partition was wiped by refresh — overwrite filter is too broad"
 
 
 def test_lineage_snapshot_id_recorded(

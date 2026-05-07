@@ -5,12 +5,17 @@ Domain: a (fictional) last-mile delivery service. We track:
   - routes
   - per-delivery facts
   - per-driver safety events from on-vehicle telemetry
+  - delivery defects (damage, complaints, contractual SLA breaches)
 
-The DITs in transformations/ progressively refine these into per-DA and
-per-station daily KPIs plus a regional safety dashboard.
+Defect data trickles in late — sometimes days after the delivery itself.
+The DITs progressively refine these into per-DA, per-station, and per-region KPIs.
+The partitioned `gold.delivery_quality_daily` DIT demonstrates Floe's
+sliding-window freshness contract: only the last 14 day-partitions are kept fresh.
+
+Dates are today-relative so the example always sits across the freshness window.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pyarrow as pa
@@ -21,8 +26,8 @@ from floe.config import FloeConfig
 CONFIG_PATH = Path(__file__).parent / "floe.yaml"
 
 
-def _ts(s: str) -> datetime:
-    return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+def _ts(d: date, hour: int, minute: int = 0) -> datetime:
+    return datetime.combine(d, time(hour, minute), tzinfo=timezone.utc)
 
 
 def main():
@@ -33,8 +38,10 @@ def main():
         uri=config.resolved_catalog_uri(),
         warehouse=config.resolved_warehouse(),
     )
-
     mgr.ensure_namespace("bronze")
+
+    today = datetime.now(timezone.utc).date()
+    days_ago = lambda n: today - timedelta(days=n)  # noqa: E731
 
     delivery_associates = pa.table({
         "da_id":      pa.array(["DA001", "DA002", "DA003", "DA004"], type=pa.string()),
@@ -51,48 +58,93 @@ def main():
         "est_minutes": pa.array([90, 60, 110], type=pa.int32()),
     })
 
+    # 24 deliveries spread from 18 days ago to today.
+    # Some fall outside the 14-day freshness window, some inside.
+    delivery_specs = [
+        # (delivery_id, da, route, days_ago, hour, on_time, seconds)
+        ("D001", "DA001", "R001", 18,  9, True,  5400),
+        ("D002", "DA002", "R002", 18, 11, True,  3700),
+        ("D003", "DA003", "R003", 17, 10, False, 7200),
+        ("D004", "DA001", "R001", 16,  9, True,  5500),
+        ("D005", "DA002", "R002", 15, 12, True,  3600),  # last day OUTSIDE 14-day window
+        ("D006", "DA001", "R001", 13,  9, True,  5300),
+        ("D007", "DA002", "R002", 13, 10, False, 4400),
+        ("D008", "DA003", "R003", 12,  8, True,  6100),
+        ("D009", "DA004", "R003", 12, 14, False, 7400),
+        ("D010", "DA001", "R001", 10,  9, True,  5200),
+        ("D011", "DA002", "R002",  9, 11, True,  3500),
+        ("D012", "DA003", "R003",  9, 10, True,  6000),
+        ("D013", "DA004", "R003",  8, 14, True,  6800),
+        ("D014", "DA001", "R001",  7,  9, True,  5100),
+        ("D015", "DA002", "R002",  6, 11, True,  3550),
+        ("D016", "DA003", "R003",  5, 10, False, 6700),
+        ("D017", "DA004", "R003",  4, 14, True,  7000),
+        ("D018", "DA001", "R001",  3,  9, True,  5050),
+        ("D019", "DA002", "R002",  3, 12, True,  3800),
+        ("D020", "DA003", "R003",  2, 10, True,  6050),
+        ("D021", "DA004", "R003",  2, 14, False, 7300),
+        ("D022", "DA001", "R001",  1,  9, True,  5000),
+        ("D023", "DA002", "R002",  0, 11, True,  3450),
+        ("D024", "DA003", "R003",  0, 10, True,  6100),
+    ]
+
     raw_deliveries = pa.table({
-        "delivery_id":      pa.array([
-            "D001","D002","D003","D004","D005","D006",
-            "D007","D008","D009","D010","D011",
-        ], type=pa.string()),
-        "da_id":            pa.array([
-            "DA001","DA001","DA002","DA002","DA003","DA004",
-            "DA001","DA002","DA003","DA003","DA004",
-        ], type=pa.string()),
-        "route_id":         pa.array([
-            "R001","R001","R002","R002","R003","R003",
-            "R001","R002","R003","R003","R003",
-        ], type=pa.string()),
-        "delivered_at":     pa.array([
-            _ts("2026-04-12T09:30:00"), _ts("2026-04-12T11:50:00"),
-            _ts("2026-04-12T10:15:00"), _ts("2026-04-12T13:05:00"),
-            _ts("2026-04-12T08:45:00"), _ts("2026-04-12T14:20:00"),
-            _ts("2026-04-13T09:10:00"), _ts("2026-04-13T11:00:00"),
-            _ts("2026-04-13T10:30:00"), _ts("2026-04-13T13:45:00"),
-            _ts("2026-04-13T14:15:00"),
-        ], type=pa.timestamp("us", tz="UTC")),
-        "on_time":          pa.array([
-            True, True, False, True, True, False,
-            True, True, True, False, True,
-        ], type=pa.bool_()),
-        "delivery_seconds": pa.array([
-            5400, 4800, 4200, 3600, 6300, 7200,
-            5100, 3500, 6000, 6600, 6900,
-        ], type=pa.int64()),
+        "delivery_id":      pa.array([d[0] for d in delivery_specs], type=pa.string()),
+        "da_id":            pa.array([d[1] for d in delivery_specs], type=pa.string()),
+        "route_id":         pa.array([d[2] for d in delivery_specs], type=pa.string()),
+        "delivered_at":     pa.array(
+            [_ts(days_ago(d[3]), d[4]) for d in delivery_specs],
+            type=pa.timestamp("us", tz="UTC"),
+        ),
+        "on_time":          pa.array([d[5] for d in delivery_specs], type=pa.bool_()),
+        "delivery_seconds": pa.array([d[6] for d in delivery_specs], type=pa.int64()),
     })
 
+    # Safety events scattered around recent deliveries.
+    safety_specs = [
+        # (event_id, da, days_ago, hour, type, severity)
+        ("S001", "DA002", 13, 10, "hard_braking",       "MEDIUM"),
+        ("S002", "DA002", 13, 11, "speeding",           "HIGH"),
+        ("S003", "DA004", 12, 14, "distracted_driving", "HIGH"),
+        ("S004", "DA004",  8, 14, "hard_braking",       "LOW"),
+        ("S005", "DA002",  6, 11, "speeding",           "MEDIUM"),
+        ("S006", "DA004",  2, 14, "hard_braking",       "MEDIUM"),
+    ]
+
     raw_safety_events = pa.table({
-        "event_id":    pa.array(["S001","S002","S003","S004"], type=pa.string()),
-        "da_id":       pa.array(["DA002","DA002","DA004","DA004"], type=pa.string()),
-        "event_type":  pa.array(["hard_braking","speeding","distracted_driving","hard_braking"], type=pa.string()),
-        "severity":    pa.array(["MEDIUM","HIGH","HIGH","LOW"], type=pa.string()),
-        "occurred_at": pa.array([
-            _ts("2026-04-12T10:14:00"),
-            _ts("2026-04-12T13:02:00"),
-            _ts("2026-04-12T14:18:00"),
-            _ts("2026-04-13T14:12:00"),
-        ], type=pa.timestamp("us", tz="UTC")),
+        "event_id":    pa.array([s[0] for s in safety_specs], type=pa.string()),
+        "da_id":       pa.array([s[1] for s in safety_specs], type=pa.string()),
+        "event_type":  pa.array([s[4] for s in safety_specs], type=pa.string()),
+        "severity":    pa.array([s[5] for s in safety_specs], type=pa.string()),
+        "occurred_at": pa.array(
+            [_ts(days_ago(s[2]), s[3]) for s in safety_specs],
+            type=pa.timestamp("us", tz="UTC"),
+        ),
+    })
+
+    # Defect reports — deliberately filed AFTER the delivery itself.
+    # Some defects reference deliveries that fall outside the 14-day freshness window.
+    defect_specs = [
+        # (defect_id, delivery_id, defect_type, severity, reported_days_ago)
+        ("F001", "D003", "damaged_package",   "HIGH",   16),  # on D003 (17d ago)
+        ("F002", "D007", "missed_drop_off",   "MEDIUM", 11),  # on D007 (13d ago)
+        ("F003", "D009", "damaged_package",   "HIGH",   10),  # on D009 (12d ago)
+        ("F004", "D013", "wrong_address",     "LOW",     6),  # on D013 (8d ago)
+        ("F005", "D016", "damaged_package",   "MEDIUM",  3),  # on D016 (5d ago)
+        ("F006", "D018", "missed_drop_off",   "LOW",     1),  # on D018 (3d ago)
+        # Late-arriving: a defect filed today against a 7-day-old delivery
+        ("F007", "D014", "customer_complaint","MEDIUM",  0),
+    ]
+
+    raw_defects = pa.table({
+        "defect_id":   pa.array([d[0] for d in defect_specs], type=pa.string()),
+        "delivery_id": pa.array([d[1] for d in defect_specs], type=pa.string()),
+        "defect_type": pa.array([d[2] for d in defect_specs], type=pa.string()),
+        "severity":    pa.array([d[3] for d in defect_specs], type=pa.string()),
+        "reported_at": pa.array(
+            [_ts(days_ago(d[4]), 12) for d in defect_specs],
+            type=pa.timestamp("us", tz="UTC"),
+        ),
     })
 
     seeds = [
@@ -100,6 +152,7 @@ def main():
         ("bronze.routes",              routes),
         ("bronze.raw_deliveries",      raw_deliveries),
         ("bronze.raw_safety_events",   raw_safety_events),
+        ("bronze.delivery_defects",    raw_defects),
     ]
 
     for name, data in seeds:
