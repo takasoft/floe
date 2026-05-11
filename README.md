@@ -29,6 +29,8 @@ CREATE DYNAMIC TABLE silver.orders
 - **Stateless workers** — all state lives in Iceberg snapshots; no external state stores
 - **Data as State** — the data itself is the source of truth; no external state stores
 - **Built-in DQ** — preconditions, quarantine routing, and automatic lineage injection on every write
+- **AI-native authoring** *(roadmap)* — describe a pipeline in plain English; Floe generates the SQL DDL and wires it into the DAG, so building a new flow takes a prompt, not a sprint
+- **Local-first iteration** *(roadmap)* — build and test pipelines instantly against a small local dataset; no CDK/CloudFormation round-trip between every change
 
 ---
 
@@ -789,6 +791,8 @@ Building the same system yourself requires writing Flink jobs per transformation
 - [ ] `floe dag` ASCII DAG visualization
 - [ ] Python SDK (full parity with SQL DDL)
 - [ ] VS Code extension (DIT syntax highlighting, DAG preview)
+- [ ] Instant local sandbox: spin up sample-data DITs in seconds (no CDK/CloudFormation), with the same DDL that runs in cloud
+- [ ] AI-native authoring: natural-language → DIT DDL via MCP server / SDK, with DAG-aware validation against the live catalog
 
 ### v1.0 — Production Hardening
 - [ ] Multi-catalog federation (query across catalogs in one DAG)
