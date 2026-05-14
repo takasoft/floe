@@ -156,6 +156,56 @@ def dag(config: Path = typer.Option(Path(DEFAULT_CONFIG), "--config", "-c")):
 
 
 @app.command()
+def watch(
+    config: Path = typer.Option(Path(DEFAULT_CONFIG), "--config", "-c"),
+    poll_interval: float = typer.Option(10.0, "--poll", help="Seconds between polls"),
+    quiet_period: float = typer.Option(
+        2.0, "--quiet", help="Debounce seconds after detecting a change"
+    ),
+    ui: bool = typer.Option(
+        True, "--ui/--no-ui", help="Show the Rich live dashboard (default) or plain logs"
+    ),
+):
+    """Watch upstream Iceberg tables and refresh dependent DITs when they change.
+
+    Polls the catalog for new snapshots on every external source; when one
+    changes, refreshes all DITs that depend on it (transitively) in
+    topological order. Press Ctrl+C to stop.
+
+    The default UI is a live Rich dashboard showing the DAG, per-table status,
+    and a rolling event log. Use --no-ui for plain log-only output (useful
+    in headless environments).
+    """
+    from floe.watcher import WatchConfig, Watcher
+
+    pipeline = Pipeline.from_config(config)
+    sources = pipeline.planner.external_sources()
+    if not sources:
+        console.print(
+            "[yellow]No external upstream sources found in this pipeline.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    cfg = WatchConfig(
+        poll_interval_seconds=poll_interval,
+        quiet_period_seconds=quiet_period,
+    )
+    watcher = Watcher(pipeline, cfg)
+
+    if ui:
+        from floe.dashboard import run_dashboard
+
+        run_dashboard(pipeline, watcher, poll_interval)
+    else:
+        console.print(f"[bold]Watching[/bold] {len(sources)} upstream source(s):")
+        for s in sources:
+            console.print(f"  - {s}")
+        console.print(f"Polling every {poll_interval}s. Press Ctrl+C to stop.")
+        console.print()
+        watcher.run()
+
+
+@app.command()
 def version():
     """Print the Floe version."""
     from floe import __version__

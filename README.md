@@ -4,33 +4,55 @@
 
 > *"Don't build the engine. Delete the engine."*
 
-Floe brings Snowflake-style Dynamic Tables to Apache Iceberg — without cloud lock-in. Declare your transformations in SQL; Floe automatically builds the dependency DAG, propagates changes incrementally when upstream data changes, and handles data quality routing — all without a custom orchestration service.
+> **Status: v0.1 MVP.** The declarative refresh engine and polling-based event-driven loop both work — define a derived table in SQL with partition windowing and refresh modes, run `floe watch`, and Floe keeps it fresh as its upstreams get new Iceberg snapshots. Data quality routing, preconditions, push-based event hooks (replacing polling), Flink-based streaming compute, and multi-cloud deployment profiles are [roadmap](#10-roadmap) items (v0.2+).
+
+## What Floe does, in one minute
+
+You have a raw data table that keeps getting new rows — delivery events, orders, telemetry. You want a *derived* table that's a cleaned, joined, or aggregated view of it, ready for downstream consumers (analytics dashboards, ML feature pipelines, BI tools). Today, you build that by writing a custom pipeline: a Spark or Redshift script that reads the raw table, transforms it, writes the result, and runs on a schedule. Every team writes that orchestration boilerplate from scratch, for every derived table they want.
+
+Floe lets you skip the boilerplate. You declare the derived table once in SQL:
 
 ```sql
 CREATE DYNAMIC TABLE silver.orders
-  LAG = '5 minutes'
+  PARTITION BY order_date
+  PARTITION_WINDOW = INTERVAL '7 days'
   REFRESH_MODE = INCREMENTAL
-  PRECONDITIONS (
-    min_rows(bronze.raw_orders, count=1)
-  )
-  ON_DQ_FAIL ROUTE TO quarantine.orders_failed
   AS
   SELECT o.order_id, o.amount, c.region
   FROM bronze.raw_orders o
   JOIN bronze.customers c ON o.customer_id = c.id;
 ```
 
-**Key properties:**
+Floe builds the dependency graph between upstream and downstream tables, runs the SELECT incrementally for only the partitions that need refreshing when upstream data lands, writes the result back into Iceberg, and injects lineage columns so you can trace every row back to the upstream snapshot that produced it. No orchestration code to write per table.
+
+```mermaid
+flowchart LR
+    A[("bronze.raw_orders<br/>(Iceberg)")] -->|new commit| F["Floe<br/>refresh engine"]
+    B[("bronze.customers<br/>(Iceberg)")] -->|new commit| F
+    D["CREATE DYNAMIC TABLE<br/>silver.orders AS SELECT ..."] -.declares.-> F
+    F -->|incremental refresh<br/>+ lineage columns| O[("silver.orders<br/>(Iceberg)")]
+    O --> Q[Analytics / ML / BI<br/>via Trino, DuckDB, Spark]
+```
+
+The vision is to bring Snowflake-style Dynamic Tables to Apache Iceberg, without cloud lock-in. v0.1 ships the core refresh engine; the rest — data quality routing, event-driven triggering, multi-cloud profiles — is what's left to build.
+
+**What's implemented today (v0.1):**
 
 - **Declarative** — define *what* you want, not *how* to refresh it
-- **Event-driven** — pipelines fire on Iceberg commit events, not cron schedules
 - **Iceberg-native** — pure open table format; works with any Iceberg-compatible reader (Trino, DuckDB, Spark)
-- **Cloud-agnostic** — runs identically on AWS, Azure, GCP, or a laptop
+- **Incremental and full refresh** with partition-aware windowing
+- **Event-driven refresh via polling** — `floe watch` keeps derived tables fresh as upstream Iceberg tables receive new snapshots
+- **Automatic lineage injection** — every row in a derived table carries `_floe_input_snapshot_id` and `_floe_job_run_id` columns
 - **Stateless workers** — all state lives in Iceberg snapshots; no external state stores
-- **Data as State** — the data itself is the source of truth; no external state stores
-- **Built-in DQ** — preconditions, quarantine routing, and automatic lineage injection on every write
-- **AI-native authoring** *(roadmap)* — describe a pipeline in plain English; Floe generates the SQL DDL and wires it into the DAG, so building a new flow takes a prompt, not a sprint
-- **Local-first iteration** *(roadmap)* — build and test pipelines instantly against a small local dataset; no CDK/CloudFormation round-trip between every change
+
+**Roadmap (v0.2 and beyond):**
+
+- **Native push-based event hooks** — Iceberg commit listeners + pluggable Event Bus (NATS, EventBridge, Event Hubs, Pub/Sub) replace the v0.1 polling loop
+- **Flink-based streaming compute** — replaces DuckDB as the production compute layer for streaming workloads and the `TRIGGERED` refresh mode
+- **Built-in data quality** — preconditions, quarantine routing, DQ rule enforcement on every write
+- **Cloud-agnostic deployment** — packaged for AWS, Azure, GCP. (v0.1 runs against a local SQLite Iceberg catalog.)
+- **AI-native authoring** — describe a pipeline in plain English; Floe generates the SQL DDL and wires it into the DAG
+- **Local-first iteration** — build and test pipelines instantly against a small local dataset; no CDK/CloudFormation round-trip per change
 
 ---
 
@@ -319,6 +341,8 @@ Floe parses all DIT definitions in a project and builds a directed acyclic graph
 
 ## 4. Architecture Overview
 
+> **v0.1 implementation note:** the architecture below is the target design. v0.1 ships a single-process implementation: polling replaces the push-based Event Bus, and DuckDB replaces Flink as the compute layer. The DAG Planner, Refresh Executor, and Catalog Manager all run in the same Python process. v0.2 swaps the polling loop for catalog commit listeners and a pluggable Event Bus; Flink integration follows.
+
 ```mermaid
 flowchart TD
     subgraph ControlPlane["Floe Control Plane"]
@@ -423,6 +447,8 @@ Wraps the Iceberg catalog to provide Floe-specific operations:
 
 ### 5.4 Event Bus (Pluggable)
 
+> **v0.1 implementation:** an in-process polling loop (`floe watch`) replaces the Event Bus. It polls every external upstream table's `current_snapshot_id` at a configurable interval and dispatches refreshes directly. The push-based design below is v0.2+.
+
 The Event Bus is the signal backbone. It carries `CommitEvent` messages from Iceberg writes to the Refresh Scheduler, and CDC events from source systems to ingestion workers.
 
 | Deployment | Event Bus | Notes |
@@ -436,6 +462,8 @@ The Event Bus is the signal backbone. It carries `CommitEvent` messages from Ice
 The Event Bus interface is a thin abstraction (`publish(event)`, `subscribe(topic, handler)`). Swapping implementations requires only a config change — no code changes to the Scheduler or workers.
 
 ### 5.5 Compute Layer (Apache Flink)
+
+> **v0.1 implementation:** DuckDB is the compute engine in v0.1, used for both `INCREMENTAL` and `FULL` refresh modes against the local SQLite Iceberg catalog. Flink integration is v0.2, where it becomes the streaming-first engine for low-latency `TRIGGERED` mode and high-throughput batch workloads. The trade-offs and deployment model below describe the v0.2+ target.
 
 Apache Flink is the primary compute engine. It was chosen over Spark/Glue for two reasons:
 
@@ -760,15 +788,19 @@ Building the same system yourself requires writing Flink jobs per transformation
 ## 10. Roadmap
 
 ### v0.1 — Foundation
-- [ ] Core DIT engine: DAG Planner, Refresh Scheduler, Catalog Manager
-- [ ] Flink compute backend
-- [ ] Local deployment (Docker Compose + MinIO + NATS + Iceberg REST)
-- [ ] `INCREMENTAL` and `FULL` refresh modes
-- [ ] Partition-aware refresh (`PARTITION BY` + `PARTITION_WINDOW` + `PARTITION_FRESHNESS`)
-- [ ] Automatic `_floe_*` lineage column injection
-- [ ] CLI: `init`, `apply`, `plan`, `status`, `refresh`
+- [x] Core DIT engine: DAG Planner, Refresh Executor, Catalog Manager
+- [x] DuckDB reference compute backend (Flink moves to v0.2)
+- [x] Local deployment against SQLite Iceberg catalog
+- [x] `INCREMENTAL` and `FULL` refresh modes
+- [x] Partition-aware refresh (`PARTITION BY` + `PARTITION_WINDOW` + `PARTITION_FRESHNESS`)
+- [x] Automatic `_floe_*` lineage column injection
+- [x] CLI: `init`, `apply`, `plan`, `status`, `refresh`, `dag`, `watch`
+- [x] Polling-based event detection (`floe watch`) — push-based hooks move to v0.2
 
-### v0.2 — Data Quality
+### v0.2 — Production Compute, Event Bus & Data Quality
+- [ ] Apache Flink compute backend (streaming-first engine, replaces DuckDB for production workloads)
+- [ ] Push-based event detection: Iceberg commit listeners + pluggable Event Bus (NATS / EventBridge / Event Hubs / Pub/Sub)
+- [ ] Docker Compose local deployment (Flink + MinIO + NATS + Iceberg REST)
 - [ ] `PRECONDITIONS` DSL (built-in functions + custom Python)
 - [ ] `DQ_RULES` DSL
 - [ ] Quarantine routing (`ON_DQ_FAIL ROUTE TO`)
