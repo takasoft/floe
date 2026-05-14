@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import duckdb
 import pyarrow as pa
@@ -21,7 +21,7 @@ class RefreshExecutor:
         self.all_dits = all_dits
 
     def refresh(self, dit: DynamicTable) -> RefreshResult:
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         job_run_id = new_job_run_id()
 
         if dit.is_partitioned:
@@ -60,7 +60,7 @@ class RefreshExecutor:
                     output_snapshot_id=self.catalog_mgr.current_snapshot_id(dit.name),
                     job_run_id=job_run_id,
                     started_at=started_at,
-                    finished_at=datetime.now(timezone.utc),
+                    finished_at=datetime.now(UTC),
                     skipped=True,
                     skip_reason="upstream snapshot unchanged",
                 )
@@ -93,7 +93,7 @@ class RefreshExecutor:
             output_snapshot_id=self.catalog_mgr.current_snapshot_id(dit.name),
             job_run_id=job_run_id,
             started_at=started_at,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(UTC),
         )
 
     # --- partitioned (window-aware) refresh --------------------------------
@@ -124,7 +124,7 @@ class RefreshExecutor:
             if last_window_refresh is None:
                 window_stale = True
             else:
-                age = (datetime.now(timezone.utc) - last_window_refresh).total_seconds()
+                age = (datetime.now(UTC) - last_window_refresh).total_seconds()
                 window_stale = age > freshness_secs
 
         if table_exists and not upstream_changed and not window_stale:
@@ -136,7 +136,7 @@ class RefreshExecutor:
                 output_snapshot_id=self.catalog_mgr.current_snapshot_id(dit.name),
                 job_run_id=job_run_id,
                 started_at=started_at,
-                finished_at=datetime.now(timezone.utc),
+                finished_at=datetime.now(UTC),
                 skipped=True,
                 skip_reason="upstream unchanged and window not stale",
             )
@@ -170,7 +170,7 @@ class RefreshExecutor:
 
         if upstream_snap is not None:
             self.catalog_mgr.set_checkpoint(dit.name, upstream_snap)
-        self.catalog_mgr.set_window_refreshed_at(dit.name, datetime.now(timezone.utc))
+        self.catalog_mgr.set_window_refreshed_at(dit.name, datetime.now(UTC))
 
         return RefreshResult(
             table=dit.name,
@@ -180,14 +180,14 @@ class RefreshExecutor:
             output_snapshot_id=self.catalog_mgr.current_snapshot_id(dit.name),
             job_run_id=job_run_id,
             started_at=started_at,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(UTC),
         )
 
     def _compute_window_cutoff(self, dit: DynamicTable) -> date | None:
         secs = dit.partition_window_seconds()
         if secs is None:
             return None
-        return (datetime.now(timezone.utc) - timedelta(seconds=secs)).date()
+        return (datetime.now(UTC) - timedelta(seconds=secs)).date()
 
     def _resolve_mode(self, dit: DynamicTable) -> RefreshMode:
         # If the output table doesn't exist yet, we must do a FULL build first.
@@ -236,9 +236,7 @@ class RefreshExecutor:
                 row_filter = self._upstream_row_filter(upstream, window_filter)
                 arrow_table = self._read_upstream(
                     upstream,
-                    incremental=(
-                        mode == RefreshMode.INCREMENTAL and upstream == primary_upstream
-                    ),
+                    incremental=(mode == RefreshMode.INCREMENTAL and upstream == primary_upstream),
                     target_dit=dit.name,
                     row_filter=row_filter,
                 )
@@ -300,11 +298,7 @@ class RefreshExecutor:
 
         if incremental and last_processed and last_processed != current_snap.snapshot_id:
             try:
-                return (
-                    table.scan(**scan_kwargs)
-                    .use_ref(current_snap.snapshot_id)
-                    .to_arrow()
-                )
+                return table.scan(**scan_kwargs).use_ref(current_snap.snapshot_id).to_arrow()
             except Exception:
                 return table.scan(**scan_kwargs).to_arrow()
         return table.scan(**scan_kwargs).to_arrow()

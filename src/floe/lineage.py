@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pyarrow as pa
 
@@ -29,7 +29,7 @@ def inject_lineage(
 ) -> pa.Table:
     """Append the four lineage columns to a PyArrow table."""
     n_rows = data.num_rows
-    ts = processed_at or datetime.now(timezone.utc)
+    ts = processed_at or datetime.now(UTC)
 
     # Strip existing lineage columns so re-runs don't accumulate
     existing = [c for c in data.column_names if c in LINEAGE_COLUMNS]
@@ -48,8 +48,7 @@ def inject_lineage(
     mode_array = pa.array([refresh_mode] * n_rows, type=pa.string())
 
     return (
-        data
-        .append_column(INPUT_SNAPSHOT_COL, snapshot_array)
+        data.append_column(INPUT_SNAPSHOT_COL, snapshot_array)
         .append_column(JOB_RUN_ID_COL, job_run_array)
         .append_column(PROCESSED_AT_COL, ts_array)
         .append_column(REFRESH_MODE_COL, mode_array)

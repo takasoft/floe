@@ -49,16 +49,20 @@ def catalog_mgr(floe_config: FloeConfig) -> CatalogManager:
 
 @pytest.fixture
 def sample_orders() -> pa.Table:
-    return pa.table({
-        "order_id": pa.array([1, 2, 3], type=pa.int64()),
-        "customer_id": pa.array([100, 101, 100], type=pa.int64()),
-        "amount": pa.array([10.5, 25.0, 7.25], type=pa.float64()),
-    })
+    return pa.table(
+        {
+            "order_id": pa.array([1, 2, 3], type=pa.int64()),
+            "customer_id": pa.array([100, 101, 100], type=pa.int64()),
+            "amount": pa.array([10.5, 25.0, 7.25], type=pa.float64()),
+        }
+    )
 
 
 @pytest.fixture
 def sample_customers() -> pa.Table:
-    return pa.table({
-        "id": pa.array([100, 101], type=pa.int64()),
-        "region": pa.array(["us-east", "us-west"], type=pa.string()),
-    })
+    return pa.table(
+        {
+            "id": pa.array([100, 101], type=pa.int64()),
+            "region": pa.array(["us-east", "us-west"], type=pa.string()),
+        }
+    )

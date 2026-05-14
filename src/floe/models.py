@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class RefreshMode(str, Enum):
+class RefreshMode(StrEnum):
     INCREMENTAL = "INCREMENTAL"
     FULL = "FULL"
 
@@ -23,7 +23,9 @@ class DynamicTable(BaseModel):
     lag: str = Field(default="5 minutes", description="Target freshness (e.g., '5 minutes')")
     refresh_mode: RefreshMode = Field(default=RefreshMode.INCREMENTAL)
     upstream_tables: list[str] = Field(default_factory=list)
-    source_path: str | None = Field(default=None, description="Path to the .sql file defining this DIT")
+    source_path: str | None = Field(
+        default=None, description="Path to the .sql file defining this DIT"
+    )
 
     # Partition-aware freshness (optional)
     partition_by: list[str] = Field(
@@ -44,8 +46,7 @@ class DynamicTable(BaseModel):
     def _single_partition_col(cls, v: list[str]) -> list[str]:
         if len(v) > 1:
             raise ValueError(
-                "MVP supports a single identity partition column; "
-                f"got {len(v)}: {v!r}"
+                f"MVP supports a single identity partition column; got {len(v)}: {v!r}"
             )
         return v
 

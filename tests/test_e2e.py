@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from pathlib import Path
 
 import pyarrow as pa
@@ -37,7 +38,9 @@ def _write_dit_file(transformations_dir: Path, name: str, sql: str):
     (transformations_dir / f"{name}.sql").write_text(sql, encoding="utf-8")
 
 
-def test_end_to_end_simple_dit(project_dir, floe_config, catalog_mgr, sample_orders, sample_customers):
+def test_end_to_end_simple_dit(
+    project_dir, floe_config, catalog_mgr, sample_orders, sample_customers
+):
     """A single DIT joining two source tables produces correct output."""
     _seed_source_tables(catalog_mgr, sample_orders, sample_customers)
 
@@ -57,6 +60,7 @@ def test_end_to_end_simple_dit(project_dir, floe_config, catalog_mgr, sample_ord
 
     # Reload pipeline with the same catalog/config so the in-test catalog state is used.
     from floe.parser import load_dits
+
     dits = load_dits(project_dir / "transformations")
     pipeline = Pipeline(floe_config, dits, catalog_mgr)
 
@@ -98,6 +102,7 @@ def test_idempotent_refresh(project_dir, floe_config, catalog_mgr, sample_orders
     )
 
     from floe.parser import load_dits
+
     dits = load_dits(project_dir / "transformations")
     pipeline = Pipeline(floe_config, dits, catalog_mgr)
 
@@ -137,6 +142,7 @@ def test_multi_hop_dag(project_dir, floe_config, catalog_mgr, sample_orders, sam
     )
 
     from floe.parser import load_dits
+
     dits = load_dits(project_dir / "transformations")
     pipeline = Pipeline(floe_config, dits, catalog_mgr)
 
@@ -151,24 +157,26 @@ def test_multi_hop_dag(project_dir, floe_config, catalog_mgr, sample_orders, sam
     logical = strip_lineage_columns(gold)
     rows = {r["region"]: r["total"] for r in logical.to_pylist()}
     assert rows["us-east"] == 17.75  # orders 1 (10.5) + 3 (7.25)
-    assert rows["us-west"] == 25.0   # order 2
+    assert rows["us-west"] == 25.0  # order 2
 
 
 def test_partitioned_refresh_window(project_dir, floe_config, catalog_mgr):
     """Partitioned DIT with WINDOW only writes in-window partitions."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
 
     # Bronze: events spanning 30 days. Window is 14 days, so only 14 partitions stay fresh.
     rows = []
     for i in range(30):
         d = today - timedelta(days=i)
         rows.append({"event_date": d, "value": i})
-    bronze = pa.table({
-        "event_date": pa.array([r["event_date"] for r in rows], type=pa.date32()),
-        "value":      pa.array([r["value"] for r in rows], type=pa.int64()),
-    })
+    bronze = pa.table(
+        {
+            "event_date": pa.array([r["event_date"] for r in rows], type=pa.date32()),
+            "value": pa.array([r["value"] for r in rows], type=pa.int64()),
+        }
+    )
 
     catalog_mgr.ensure_namespace("bronze")
     bt = catalog_mgr.catalog.create_table("bronze.events", schema=bronze.schema)
@@ -190,6 +198,7 @@ def test_partitioned_refresh_window(project_dir, floe_config, catalog_mgr):
     )
 
     from floe.parser import load_dits
+
     dits = load_dits(project_dir / "transformations")
     pipeline = Pipeline(floe_config, dits, catalog_mgr)
 
@@ -206,13 +215,15 @@ def test_partitioned_refresh_window(project_dir, floe_config, catalog_mgr):
 
 def test_partitioned_refresh_skip_when_fresh(project_dir, floe_config, catalog_mgr):
     """A partitioned DIT skips when upstream is unchanged AND window is fresh."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    today = datetime.now(timezone.utc).date()
-    bronze = pa.table({
-        "event_date": pa.array([today, today - timedelta(days=1)], type=pa.date32()),
-        "value":      pa.array([1, 2], type=pa.int64()),
-    })
+    today = datetime.now(UTC).date()
+    bronze = pa.table(
+        {
+            "event_date": pa.array([today, today - timedelta(days=1)], type=pa.date32()),
+            "value": pa.array([1, 2], type=pa.int64()),
+        }
+    )
 
     catalog_mgr.ensure_namespace("bronze")
     catalog_mgr.catalog.create_table("bronze.events", schema=bronze.schema).append(bronze)
@@ -231,6 +242,7 @@ def test_partitioned_refresh_skip_when_fresh(project_dir, floe_config, catalog_m
     )
 
     from floe.parser import load_dits
+
     dits = load_dits(project_dir / "transformations")
     pipeline = Pipeline(floe_config, dits, catalog_mgr)
 
@@ -245,17 +257,19 @@ def test_partitioned_refresh_skip_when_fresh(project_dir, floe_config, catalog_m
 
 def test_partitioned_refresh_replaces_only_in_window(project_dir, floe_config, catalog_mgr):
     """An older out-of-window partition written by hand is left untouched by refresh."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
 
     # Bronze has only recent data (last 3 days).
-    bronze = pa.table({
-        "event_date": pa.array(
-            [today, today - timedelta(days=1), today - timedelta(days=2)], type=pa.date32()
-        ),
-        "value": pa.array([10, 20, 30], type=pa.int64()),
-    })
+    bronze = pa.table(
+        {
+            "event_date": pa.array(
+                [today, today - timedelta(days=1), today - timedelta(days=2)], type=pa.date32()
+            ),
+            "value": pa.array([10, 20, 30], type=pa.int64()),
+        }
+    )
     catalog_mgr.ensure_namespace("bronze")
     catalog_mgr.catalog.create_table("bronze.events", schema=bronze.schema).append(bronze)
 
@@ -272,29 +286,35 @@ def test_partitioned_refresh_replaces_only_in_window(project_dir, floe_config, c
     )
 
     from floe.parser import load_dits
+
     dits = load_dits(project_dir / "transformations")
     pipeline = Pipeline(floe_config, dits, catalog_mgr)
     pipeline.refresh_all()
 
     # Manually append a row OUTSIDE the 5-day window — simulating a backfill or older data.
     old_date = today - timedelta(days=20)
-    out_of_window = pa.table({
-        "event_date":              pa.array([old_date], type=pa.date32()),
-        "total":                   pa.array([999], type=pa.int64()),
-        "_floe_input_snapshot_id": pa.array([0], type=pa.int64()),
-        "_floe_job_run_id":        pa.array(["manual"], type=pa.string()),
-        "_floe_processed_at":      pa.array(
-            [datetime.now(timezone.utc)], type=pa.timestamp("us", tz="UTC")
-        ),
-        "_floe_refresh_mode":      pa.array(["MANUAL"], type=pa.string()),
-    })
+    out_of_window = pa.table(
+        {
+            "event_date": pa.array([old_date], type=pa.date32()),
+            "total": pa.array([999], type=pa.int64()),
+            "_floe_input_snapshot_id": pa.array([0], type=pa.int64()),
+            "_floe_job_run_id": pa.array(["manual"], type=pa.string()),
+            "_floe_processed_at": pa.array([datetime.now(UTC)], type=pa.timestamp("us", tz="UTC")),
+            "_floe_refresh_mode": pa.array(["MANUAL"], type=pa.string()),
+        }
+    )
     catalog_mgr.load_table("gold.daily").append(out_of_window)
 
     # Bump bronze so a refresh fires
-    catalog_mgr.append("bronze.events", pa.table({
-        "event_date": pa.array([today], type=pa.date32()),
-        "value":      pa.array([5], type=pa.int64()),
-    }))
+    catalog_mgr.append(
+        "bronze.events",
+        pa.table(
+            {
+                "event_date": pa.array([today], type=pa.date32()),
+                "value": pa.array([5], type=pa.int64()),
+            }
+        ),
+    )
 
     pipeline.refresh_all()
 
@@ -315,6 +335,7 @@ def test_lineage_snapshot_id_recorded(
     )
 
     from floe.parser import load_dits
+
     dits = load_dits(project_dir / "transformations")
     pipeline = Pipeline(floe_config, dits, catalog_mgr)
 

@@ -181,9 +181,7 @@ def watch(
     pipeline = Pipeline.from_config(config)
     sources = pipeline.planner.external_sources()
     if not sources:
-        console.print(
-            "[yellow]No external upstream sources found in this pipeline.[/yellow]"
-        )
+        console.print("[yellow]No external upstream sources found in this pipeline.[/yellow]")
         raise typer.Exit(1)
 
     cfg = WatchConfig(
@@ -209,6 +207,7 @@ def watch(
 def version():
     """Print the Floe version."""
     from floe import __version__
+
     console.print(f"floe {__version__}")
 
 

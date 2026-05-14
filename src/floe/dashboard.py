@@ -121,9 +121,7 @@ class WatcherDashboard:
         st.flash_until = time.time() + FLASH_DURATION_S
         col = _ns_color(dit_name)
         if result.skipped:
-            self.log(
-                f"[yellow]skipped[/yellow] [{col}]{dit_name}[/{col}] · {result.skip_reason}"
-            )
+            self.log(f"[yellow]skipped[/yellow] [{col}]{dit_name}[/{col}] · {result.skip_reason}")
         else:
             self.log(
                 f"[green]✓[/green] [{col}]{dit_name}[/{col}]  "
@@ -152,9 +150,7 @@ class WatcherDashboard:
             dot = "[dim]○[/dim]"
         is_flashing = time.time() < st.flash_until
         name_token = (
-            f"[reverse {col}]{name}[/reverse {col}]"
-            if is_flashing
-            else f"[{col}]{name}[/{col}]"
+            f"[reverse {col}]{name}[/reverse {col}]" if is_flashing else f"[{col}]{name}[/{col}]"
         )
         snap_token = f"[dim]snap={_short_snap(st.snapshot_id)}[/dim]"
         recency = ""

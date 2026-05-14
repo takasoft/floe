@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pyarrow as pa
@@ -141,7 +141,7 @@ class CatalogManager:
     def set_window_refreshed_at(self, name: str, ts: datetime) -> None:
         table = self._catalog.load_table(name)
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            ts = ts.replace(tzinfo=UTC)
         with table.transaction() as txn:
             txn.set_properties({WINDOW_REFRESHED_AT_PROPERTY: ts.isoformat()})
 

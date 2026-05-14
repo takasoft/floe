@@ -61,7 +61,7 @@ class FloeConfig(BaseModel):
     def resolved_catalog_uri(self) -> str:
         uri = self.catalog.uri
         if uri.startswith("sqlite:///") and not uri.startswith("sqlite:////"):
-            relative = uri[len("sqlite:///"):]
+            relative = uri[len("sqlite:///") :]
             abs_path = (self.project_root / relative).resolve()
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             return f"sqlite:///{abs_path.as_posix()}"

@@ -48,7 +48,5 @@ def test_new_job_run_id_unique():
 
 def test_lineage_with_null_snapshot():
     data = pa.table({"x": [1, 2]})
-    result = inject_lineage(
-        data, input_snapshot_id=None, job_run_id="r", refresh_mode="FULL"
-    )
+    result = inject_lineage(data, input_snapshot_id=None, job_run_id="r", refresh_mode="FULL")
     assert result[INPUT_SNAPSHOT_COL].null_count == 2

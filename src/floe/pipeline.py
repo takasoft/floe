@@ -57,13 +57,17 @@ class Pipeline:
         for name in self.planner.topological_order():
             dit = self.dits[name]
             exists = self.catalog_mgr.table_exists(name)
-            rows.append({
-                "name": name,
-                "exists": exists,
-                "refresh_mode": dit.refresh_mode.value,
-                "lag": dit.lag,
-                "current_snapshot": self.catalog_mgr.current_snapshot_id(name) if exists else None,
-                "checkpoint": self.catalog_mgr.get_checkpoint(name) if exists else None,
-                "upstream": dit.upstream_tables,
-            })
+            rows.append(
+                {
+                    "name": name,
+                    "exists": exists,
+                    "refresh_mode": dit.refresh_mode.value,
+                    "lag": dit.lag,
+                    "current_snapshot": self.catalog_mgr.current_snapshot_id(name)
+                    if exists
+                    else None,
+                    "checkpoint": self.catalog_mgr.get_checkpoint(name) if exists else None,
+                    "upstream": dit.upstream_tables,
+                }
+            )
         return rows
