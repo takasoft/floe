@@ -67,6 +67,9 @@ class WatcherDashboard:
         # Most recently observed tail rows per changed external source. Populated
         # in on_change so the UI can show "what actually landed in bronze."
         self.recent_activity: dict[str, object] = {}  # source_name -> pa.Table
+        # Lineage chain (refreshed DIT -> primary upstream -> ...) built from the
+        # `_floe_input_snapshot_id` column after each successful refresh.
+        self.last_lineage_chain: list[tuple[str, int | None]] = []
         for src in pipeline.planner.external_sources():
             self.tables[src] = TableState(name=src)
         for dit in pipeline.planner.topological_order():
@@ -159,6 +162,9 @@ class WatcherDashboard:
                 f"[green]✓[/green] [{col}]{dit_name}[/{col}]  "
                 f"{result.rows_written} rows · {result.duration_ms} ms"
             )
+            chain = self._build_lineage_chain(dit_name)
+            if chain:
+                self.last_lineage_chain = chain
 
     def on_refresh_error(self, dit_name: str, exc: BaseException) -> None:
         st = self.tables.setdefault(dit_name, TableState(name=dit_name))
@@ -192,7 +198,59 @@ class WatcherDashboard:
                 f"  [dim]· refreshed {ago:.0f}s ago"
                 f" · {st.last_rows_written} rows · {st.last_refresh_ms} ms[/dim]"
             )
-        return f"{dot} {name_token}  {snap_token}{recency}"
+        deps = ""
+        if name in self.pipeline.dits:
+            upstreams = self.pipeline.dits[name].upstream_tables
+            if upstreams:
+                deps = f"  [dim]← from {', '.join(upstreams)}[/dim]"
+        return f"{dot} {name_token}  {snap_token}{recency}{deps}"
+
+    def _build_lineage_chain(self, dit_name: str) -> list[tuple[str, int | None]]:
+        """Trace where the latest row of ``dit_name`` came from.
+
+        Walks the primary-upstream chain, reading the ``_floe_input_snapshot_id``
+        column at each hop until it reaches an external source (which has no
+        lineage column). Returns ``[(table, snapshot_id), ...]`` from the
+        refreshed DIT down to its bronze root. Returns ``[]`` if any read fails.
+        """
+        chain: list[tuple[str, int | None]] = []
+        current = dit_name
+        next_snap: int | None = None
+        visited: set[str] = set()
+        for _hop in range(5):  # cap depth so a cycle can't run away
+            if current in visited:
+                break
+            visited.add(current)
+            try:
+                if not self.pipeline.catalog_mgr.table_exists(current):
+                    break
+                ib_table = self.pipeline.catalog_mgr.load_table(current)
+                cur_snap = (
+                    next_snap
+                    if next_snap is not None
+                    else (
+                        ib_table.current_snapshot().snapshot_id
+                        if ib_table.current_snapshot()
+                        else None
+                    )
+                )
+                chain.append((current, cur_snap))
+
+                # External sources have no lineage column — stop here.
+                if current not in self.pipeline.dits:
+                    break
+                arrow = ib_table.scan().to_arrow()
+                if arrow.num_rows == 0 or "_floe_input_snapshot_id" not in arrow.column_names:
+                    break
+                input_snap = arrow["_floe_input_snapshot_id"][-1].as_py()
+                upstreams = self.pipeline.dits[current].upstream_tables
+                if not upstreams:
+                    break
+                current = upstreams[0]  # primary upstream
+                next_snap = input_snap
+            except Exception:  # noqa: BLE001 -- catalog drivers throw varied types
+                break
+        return chain
 
     def __rich__(self) -> Group:
         return self._render()
@@ -221,12 +279,40 @@ class WatcherDashboard:
             managed_branch.add(self._format_node(dit, st))
         dag_panel = Panel(tree, title="DAG", border_style="white", padding=(0, 1))
         activity_panel = self._render_activity_panel()
+        lineage_panel = self._render_lineage_panel()
         if not self.events:
             evt_content = Text.from_markup("[dim]Waiting for upstream changes…[/dim]")
         else:
             evt_content = Text("\n").join(self.events)
         evt_panel = Panel(evt_content, title="Events", border_style="blue", padding=(0, 1))
-        return Group(header, dag_panel, activity_panel, evt_panel)
+        return Group(header, dag_panel, activity_panel, lineage_panel, evt_panel)
+
+    def _render_lineage_panel(self) -> Panel:
+        if not self.last_lineage_chain:
+            return Panel(
+                Text.from_markup(
+                    "[dim]Lineage trace will appear here after the first refresh — "
+                    "every row carries its upstream snapshot ID.[/dim]"
+                ),
+                title="Lineage trace (latest refreshed row)",
+                border_style="magenta",
+                padding=(0, 1),
+            )
+        rows: list = []
+        for i, (table, snap) in enumerate(self.last_lineage_chain):
+            col = _ns_color(table)
+            connector = "  [magenta]←[/magenta] " if i > 0 else "    "
+            rows.append(
+                Text.from_markup(
+                    f"{connector}[{col}]{table}[/{col}]  [dim]@ snap {_short_snap(snap)}[/dim]"
+                )
+            )
+        return Panel(
+            Group(*rows),
+            title="Lineage trace (latest refreshed row)",
+            border_style="magenta",
+            padding=(0, 1),
+        )
 
     def _render_activity_panel(self) -> Panel:
         if not self.recent_activity:

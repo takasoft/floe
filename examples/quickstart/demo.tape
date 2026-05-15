@@ -14,7 +14,7 @@ Output examples/quickstart/demo.gif
 
 Set FontSize 13
 Set Width 1400
-Set Height 900
+Set Height 1050
 Set Theme "Catppuccin Mocha"
 Set Padding 20
 Set PlaybackSpeed 1.0
@@ -30,9 +30,9 @@ Enter
 
 # Let the full demo play out:
 #   - dashboard spins up (~1s)
-#   - first append fires at ~7s
-#   - first refresh visible at ~10s
-#   - second append fires at ~16s
-#   - second refresh visible at ~19s
-#   - max_iterations=9 ends watcher at ~27s
-Sleep 32s
+#   - first append (delivery) fires at ~7s
+#   - first cascade visible at ~10s (silver + multiple golds refresh)
+#   - second append (defect) fires at ~18s
+#   - second refresh visible at ~21s (only gold.delivery_quality_daily)
+#   - max_iterations=10 ends watcher at ~30s
+Sleep 35s
