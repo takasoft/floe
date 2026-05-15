@@ -18,6 +18,7 @@ from datetime import datetime
 from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
+from rich.table import Table as RichTable
 from rich.text import Text
 from rich.tree import Tree
 
@@ -28,6 +29,7 @@ from floe.watcher import Watcher
 MAX_LOG_LINES = 12
 SNAPSHOT_DIGITS = 8  # show only the last N digits — full IDs are unwieldy
 FLASH_DURATION_S = 2.5  # seconds to keep a "just changed" highlight on a row
+RECENT_ROWS_PER_SOURCE = 3  # how many tail rows to show per changed bronze table
 
 
 def _ns_color(name: str) -> str:
@@ -62,6 +64,9 @@ class WatcherDashboard:
         self.poll_interval = poll_interval
         self.events: deque[Text] = deque(maxlen=MAX_LOG_LINES)
         self.tables: dict[str, TableState] = {}
+        # Most recently observed tail rows per changed external source. Populated
+        # in on_change so the UI can show "what actually landed in bronze."
+        self.recent_activity: dict[str, object] = {}  # source_name -> pa.Table
         for src in pipeline.planner.external_sources():
             self.tables[src] = TableState(name=src)
         for dit in pipeline.planner.topological_order():
@@ -102,8 +107,31 @@ class WatcherDashboard:
             new_snap = self.watcher.last_seen.get(src)
             st.snapshot_id = new_snap
             st.flash_until = time.time() + FLASH_DURATION_S
+            tail = self._read_tail(src, limit=RECENT_ROWS_PER_SOURCE)
+            if tail is not None:
+                self.recent_activity[src] = tail
         names = ", ".join(f"[cyan]{s}[/cyan]" for s in sorted(sources))
         self.log(f"[bold yellow]change detected[/bold yellow] on {names}")
+
+    def _read_tail(self, source_name: str, *, limit: int):
+        """Read the most recently appended rows from ``source_name``.
+
+        Returns the last ``limit`` rows in Iceberg scan order — for tables that
+        are append-only (the demo's bronze tables) this matches "latest by
+        insertion." Returns ``None`` on any read error so dashboard rendering
+        never fails because of a transient catalog read.
+        """
+        try:
+            if not self.pipeline.catalog_mgr.table_exists(source_name):
+                return None
+            ib_table = self.pipeline.catalog_mgr.load_table(source_name)
+            arrow = ib_table.scan().to_arrow()
+            if arrow.num_rows == 0:
+                return None
+            start = max(0, arrow.num_rows - limit)
+            return arrow.slice(start, arrow.num_rows - start)
+        except Exception:  # noqa: BLE001 -- catalog drivers throw varied types
+            return None
 
     def on_refresh_start(self, dit_name: str) -> None:
         st = self.tables.setdefault(dit_name, TableState(name=dit_name))
@@ -113,16 +141,20 @@ class WatcherDashboard:
 
     def on_refresh_done(self, dit_name: str, result: RefreshResult) -> None:
         st = self.tables.setdefault(dit_name, TableState(name=dit_name))
-        st.status = "fresh"
-        st.last_refresh_time = datetime.now()
-        st.last_refresh_ms = result.duration_ms
-        st.last_rows_written = result.rows_written
-        st.snapshot_id = result.output_snapshot_id or st.snapshot_id
         st.flash_until = time.time() + FLASH_DURATION_S
         col = _ns_color(dit_name)
         if result.skipped:
+            # Skipped means "nothing to do" — leave the last_* fields pointing
+            # at the most recent successful refresh so the DAG tree doesn't
+            # regress to "0 rows · 0 ms."
+            st.status = "fresh"
             self.log(f"[yellow]skipped[/yellow] [{col}]{dit_name}[/{col}] · {result.skip_reason}")
         else:
+            st.status = "fresh"
+            st.last_refresh_time = datetime.now()
+            st.last_refresh_ms = result.duration_ms
+            st.last_rows_written = result.rows_written
+            st.snapshot_id = result.output_snapshot_id or st.snapshot_id
             self.log(
                 f"[green]✓[/green] [{col}]{dit_name}[/{col}]  "
                 f"{result.rows_written} rows · {result.duration_ms} ms"
@@ -188,12 +220,53 @@ class WatcherDashboard:
             st = self.tables.setdefault(dit, TableState(name=dit))
             managed_branch.add(self._format_node(dit, st))
         dag_panel = Panel(tree, title="DAG", border_style="white", padding=(0, 1))
+        activity_panel = self._render_activity_panel()
         if not self.events:
             evt_content = Text.from_markup("[dim]Waiting for upstream changes…[/dim]")
         else:
             evt_content = Text("\n").join(self.events)
         evt_panel = Panel(evt_content, title="Events", border_style="blue", padding=(0, 1))
-        return Group(header, dag_panel, evt_panel)
+        return Group(header, dag_panel, activity_panel, evt_panel)
+
+    def _render_activity_panel(self) -> Panel:
+        if not self.recent_activity:
+            return Panel(
+                Text.from_markup("[dim]Waiting for upstream changes…[/dim]"),
+                title="Recent Upstream Activity",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        sections: list = []
+        for src, arrow in self.recent_activity.items():
+            col = _ns_color(src)
+            sections.append(Text.from_markup(f"[bold {col}]{src}[/bold {col}]"))
+            t = RichTable(
+                show_header=True,
+                header_style="dim",
+                box=None,
+                pad_edge=False,
+                padding=(0, 1),
+            )
+            for c in arrow.column_names:
+                t.add_column(c, style="bright_white", overflow="fold")
+            for i in range(arrow.num_rows):
+                cells = []
+                for c in arrow.column_names:
+                    v = arrow[c][i].as_py()
+                    if isinstance(v, datetime):
+                        cells.append(v.strftime("%m-%d %H:%M:%S"))
+                    elif v is None:
+                        cells.append("—")
+                    else:
+                        cells.append(str(v))
+                t.add_row(*cells)
+            sections.append(t)
+        return Panel(
+            Group(*sections),
+            title="Recent Upstream Activity",
+            border_style="cyan",
+            padding=(0, 1),
+        )
 
 
 def run_dashboard(pipeline: Pipeline, watcher: Watcher, poll_interval: float) -> None:
@@ -214,10 +287,7 @@ def run_dashboard(pipeline: Pipeline, watcher: Watcher, poll_interval: float) ->
                     on_refresh_error=dashboard.on_refresh_error,
                 )
                 iter_count += 1
-                if (
-                    watcher.config.max_iterations
-                    and iter_count >= watcher.config.max_iterations
-                ):
+                if watcher.config.max_iterations and iter_count >= watcher.config.max_iterations:
                     break
         except KeyboardInterrupt:
             dashboard.log("[red]stopped by user[/red]")

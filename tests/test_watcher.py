@@ -87,7 +87,7 @@ def test_run_triggers_refresh_when_upstream_changes():
     pipeline = _mock_pipeline(dits, snapshots)
 
     refreshed: list[str] = []
-    pipeline.executor.refresh.side_effect = lambda dit: refreshed.append(dit.name)
+    pipeline.executor.refresh.side_effect = lambda dit, **_kw: refreshed.append(dit.name)
 
     watcher = Watcher(
         pipeline,
@@ -118,7 +118,7 @@ def test_run_does_not_refresh_when_no_changes():
     pipeline = _mock_pipeline(dits, snapshots)
 
     refreshed: list[str] = []
-    pipeline.executor.refresh.side_effect = lambda dit: refreshed.append(dit.name)
+    pipeline.executor.refresh.side_effect = lambda dit, **_kw: refreshed.append(dit.name)
 
     watcher = Watcher(
         pipeline,

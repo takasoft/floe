@@ -20,18 +20,27 @@ class RefreshExecutor:
         self.catalog_mgr = catalog_mgr
         self.all_dits = all_dits
 
-    def refresh(self, dit: DynamicTable) -> RefreshResult:
+    def refresh(self, dit: DynamicTable, *, force: bool = False) -> RefreshResult:
+        """Refresh a single DIT.
+
+        With ``force=True`` the executor skips its "is this stale?" short-circuit
+        and always re-runs the underlying query. The watcher uses this because it
+        has already detected the upstream change that motivated the refresh — its
+        primary-upstream-only staleness check would otherwise miss changes to
+        non-primary upstreams (e.g. a defect appended to ``bronze.delivery_defects``
+        for a DIT whose primary upstream is ``silver.deliveries_enriched``).
+        """
         started_at = datetime.now(UTC)
         job_run_id = new_job_run_id()
 
         if dit.is_partitioned:
-            return self._refresh_partitioned(dit, started_at, job_run_id)
-        return self._refresh_unpartitioned(dit, started_at, job_run_id)
+            return self._refresh_partitioned(dit, started_at, job_run_id, force=force)
+        return self._refresh_unpartitioned(dit, started_at, job_run_id, force=force)
 
     # --- unpartitioned (table-level) refresh -------------------------------
 
     def _refresh_unpartitioned(
-        self, dit: DynamicTable, started_at: datetime, job_run_id: str
+        self, dit: DynamicTable, started_at: datetime, job_run_id: str, *, force: bool = False
     ) -> RefreshResult:
         effective_mode = self._resolve_mode(dit)
         primary_upstream = self._primary_upstream(dit)
@@ -41,7 +50,7 @@ class RefreshExecutor:
             else None
         )
 
-        if effective_mode == RefreshMode.INCREMENTAL and primary_upstream:
+        if not force and effective_mode == RefreshMode.INCREMENTAL and primary_upstream:
             last_processed = (
                 self.catalog_mgr.get_checkpoint(dit.name)
                 if self.catalog_mgr.table_exists(dit.name)
@@ -99,7 +108,7 @@ class RefreshExecutor:
     # --- partitioned (window-aware) refresh --------------------------------
 
     def _refresh_partitioned(
-        self, dit: DynamicTable, started_at: datetime, job_run_id: str
+        self, dit: DynamicTable, started_at: datetime, job_run_id: str, *, force: bool = False
     ) -> RefreshResult:
         partition_col = dit.partition_by[0]
 
@@ -127,7 +136,7 @@ class RefreshExecutor:
                 age = (datetime.now(UTC) - last_window_refresh).total_seconds()
                 window_stale = age > freshness_secs
 
-        if table_exists and not upstream_changed and not window_stale:
+        if not force and table_exists and not upstream_changed and not window_stale:
             return RefreshResult(
                 table=dit.name,
                 mode=dit.refresh_mode,
