@@ -1,0 +1,104 @@
+name: Demo GIF
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'examples/quickstart/demo.tape'
+      - 'examples/quickstart/demo_runner.py'
+      - 'examples/quickstart/seed_sources.py'
+      - 'examples/quickstart/append_defect.py'
+      - 'examples/quickstart/floe.yaml'
+      - 'src/floe/dashboard.py'
+      - 'src/floe/watcher.py'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: demo-gif
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Floe
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Install VHS, ttyd, and ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+          # ttyd (static x86_64 binary from upstream releases)
+          curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64" -o /tmp/ttyd
+          chmod +x /tmp/ttyd
+          sudo mv /tmp/ttyd /usr/local/bin/ttyd
+
+          # VHS
+          mkdir -p /tmp/vhs-extract
+          curl -fsSL "https://github.com/charmbracelet/vhs/releases/download/v0.11.0/vhs_0.11.0_Linux_x86_64.tar.gz" \
+            | tar xz -C /tmp/vhs-extract
+          # Locate the vhs binary regardless of the archive's top-level layout
+          VHS_BIN=$(find /tmp/vhs-extract -type f -name vhs -executable | head -1)
+          if [ -z "$VHS_BIN" ]; then
+            echo "Could not find vhs binary inside the release archive" >&2
+            find /tmp/vhs-extract -type f >&2
+            exit 1
+          fi
+          sudo mv "$VHS_BIN" /usr/local/bin/vhs
+
+          vhs --version
+          ttyd --version 2>&1 | head -1
+          ffmpeg -version | head -1
+
+      - name: Bootstrap quickstart catalog
+        working-directory: examples/quickstart
+        run: |
+          source ../../.venv/bin/activate
+          python seed_sources.py
+          floe apply
+
+      - name: Generate demo GIF
+        run: |
+          source .venv/bin/activate
+          vhs examples/quickstart/demo.tape
+          ls -lh examples/quickstart/demo.gif
+
+      - name: Upload GIF as release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create the `demo-latest` release on first run; subsequent runs
+          # just replace the asset on the existing release so the README's
+          # download URL stays stable.
+          if ! gh release view demo-latest >/dev/null 2>&1; then
+            gh release create demo-latest \
+              --title "Demo GIF (latest)" \
+              --notes "Auto-generated demo GIF for the README. Updated by the \`demo-gif\` workflow on every change to the demo tape, runner, or watcher dashboard code." \
+              --latest=false
+          fi
+          gh release upload demo-latest examples/quickstart/demo.gif --clobber
+
+      - name: Also upload as workflow artifact (for diagnosis)
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-gif
+          path: examples/quickstart/demo.gif
+          retention-days: 14

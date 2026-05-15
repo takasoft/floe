@@ -6,6 +6,8 @@
 
 > **Status: v0.1 MVP.** The declarative refresh engine and polling-based event-driven loop both work — define a derived table in SQL with partition windowing and refresh modes, run `floe watch`, and Floe keeps it fresh as its upstreams get new Iceberg snapshots. Data quality routing, preconditions, push-based event hooks (replacing polling), Flink-based streaming compute, and multi-cloud deployment profiles are [roadmap](#10-roadmap) items (v0.2+).
 
+![Floe watcher dashboard auto-refreshing downstream DITs as upstream Iceberg tables receive new commits](https://github.com/takasoft/floe/releases/download/demo-latest/demo.gif)
+
 ## What Floe does, in one minute
 
 You have a raw data table that keeps getting new rows — delivery events, orders, telemetry. You want a *derived* table that's a cleaned, joined, or aggregated view of it, ready for downstream consumers (analytics dashboards, ML feature pipelines, BI tools). Today, you build that by writing a custom pipeline: a Spark or Redshift script that reads the raw table, transforms it, writes the result, and runs on a schedule. Every team writes that orchestration boilerplate from scratch, for every derived table they want.
