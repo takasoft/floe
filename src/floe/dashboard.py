@@ -204,6 +204,7 @@ def run_dashboard(pipeline: Pipeline, watcher: Watcher, poll_interval: float) ->
 
     with Live(dashboard, refresh_per_second=4, screen=False):
         try:
+            iter_count = 0
             while True:
                 time.sleep(poll_interval)
                 watcher.step(
@@ -212,5 +213,11 @@ def run_dashboard(pipeline: Pipeline, watcher: Watcher, poll_interval: float) ->
                     on_refresh_done=dashboard.on_refresh_done,
                     on_refresh_error=dashboard.on_refresh_error,
                 )
+                iter_count += 1
+                if (
+                    watcher.config.max_iterations
+                    and iter_count >= watcher.config.max_iterations
+                ):
+                    break
         except KeyboardInterrupt:
             dashboard.log("[red]stopped by user[/red]")

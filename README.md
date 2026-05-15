@@ -56,6 +56,31 @@ The vision is to bring Snowflake-style Dynamic Tables to Apache Iceberg, without
 
 ---
 
+## Try the demo
+
+The quickstart example ships a self-contained delivery-analytics catalog and a demo runner that fires two upstream appends while the dashboard is live:
+
+```bash
+# one-time setup
+cd examples/quickstart
+python seed_sources.py   # seeds bronze.deliveries + bronze.delivery_defects
+floe apply               # materialises all three DITs for the first time
+
+# watch the live dashboard
+python demo_runner.py    # starts floe watch with the Rich UI; appends data twice in the background
+```
+
+The dashboard shows the pipeline DAG, per-table status, snapshot IDs, and a rolling event log — all updating in real time as Floe detects new Iceberg snapshots and refreshes downstream tables.
+
+To record a GIF of the demo (Linux/macOS, requires [VHS](https://github.com/charmbracelet/vhs)):
+
+```bash
+# from the repo root (venv must be active)
+vhs examples/quickstart/demo.tape
+```
+
+---
+
 ## Table of Contents
 
 1. [The Problem](#1-the-problem)
