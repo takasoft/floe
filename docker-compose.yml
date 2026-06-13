@@ -106,7 +106,17 @@ services:
   # One-shot: seed the bronze source tables into the catalog/warehouse.
   floe-seed:
     <<: *floe-build
-    environment: *floe-env
+    environment:
+      <<: *floe-env
+      # Optional performance-test knob: 0 (default) seeds the small curated
+      # quickstart dataset; a positive value generates that many synthetic,
+      # FK-consistent delivery rows (with proportional safety events/defects).
+      FLOE_SEED_DELIVERIES: "${FLOE_SEED_DELIVERIES:-0}"
+      FLOE_SEED_DAYS: "${FLOE_SEED_DAYS:-30}"
+      FLOE_SEED_DAS: "${FLOE_SEED_DAS:-2000}"
+      FLOE_SEED_ROUTES: "${FLOE_SEED_ROUTES:-800}"
+      FLOE_SEED_SAFETY_PCT: "${FLOE_SEED_SAFETY_PCT:-8}"
+      FLOE_SEED_DEFECT_PCT: "${FLOE_SEED_DEFECT_PCT:-4}"
     depends_on:
       postgres:
         condition: service_healthy
