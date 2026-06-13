@@ -11,7 +11,11 @@
 #   cp .env.example .env      # then edit secrets if you like
 #   docker compose up --build
 #
+#   # Optional, experimental: also run Flink against the same Iceberg tables
+#   docker compose --profile flink up --build
+#
 # MinIO console: http://localhost:9001  (login with the .env credentials)
+# Flink dashboard (flink profile): http://localhost:8081
 
 name: floe
 
@@ -29,6 +33,29 @@ x-floe-build: &floe-build
   build:
     context: .
     dockerfile: Dockerfile
+
+# Flink image (stock Flink + Iceberg/S3/Postgres jars). Only used by the opt-in
+# `flink` profile; `docker compose up` without that profile never builds it.
+x-flink-image: &flink-image
+  build:
+    context: ./docker/flink
+    dockerfile: Dockerfile
+
+# Connection settings the one-shot Flink SQL demo needs to reach Floe's catalog
+# and warehouse. Note the JDBC URI is the plain Java form (not the SQLAlchemy
+# `postgresql+psycopg2://` form PyIceberg uses).
+x-flink-catalog-env: &flink-catalog-env
+  FLINK_JOBMANAGER_HOST: flink-jobmanager
+  FLINK_JDBC_URI: "jdbc:postgresql://postgres:5432/${POSTGRES_DB}"
+  POSTGRES_USER: "${POSTGRES_USER}"
+  POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+  FLOE_WAREHOUSE: "s3://${FLOE_BUCKET}/wh"
+  FLOE_S3_ENDPOINT: "http://minio:9000"
+  FLOE_S3_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+  FLOE_S3_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+  FLOE_S3_REGION: "us-east-1"
+  # Must match Floe's project name so Flink's JdbcCatalog resolves the same rows.
+  FLOE_CATALOG_NAME: quickstart
 
 services:
   minio:
@@ -108,6 +135,55 @@ services:
         condition: service_completed_successfully
     command: ["watch", "--no-ui", "-c", "examples/quickstart/floe.yaml", "--poll", "10"]
     restart: unless-stopped
+
+  # --- Experimental Flink profile (opt-in) ----------------------------------
+  # Demonstrates a second engine operating on the SAME Iceberg tables Floe
+  # manages: Flink reads a Floe-authored silver table and writes a gold rollup
+  # back into the shared catalog. Floe's own refresh engine is still DuckDB; this
+  # is a preview of the roadmap's Flink-based compute, not a replacement for it.
+  #
+  # Start with:  docker compose --profile flink up --build
+  # (the core services above still run; the flink-* services are added on top.)
+  flink-jobmanager:
+    <<: *flink-image
+    profiles: ["flink"]
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/overview || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  flink-taskmanager:
+    <<: *flink-image
+    profiles: ["flink"]
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+
+  # One-shot: run the Flink SQL demo once the cluster is up and Floe has applied
+  # its tables (so silver.deliveries_enriched exists to read from).
+  flink-sql:
+    <<: *flink-image
+    profiles: ["flink"]
+    environment: *flink-catalog-env
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+      floe-apply:
+        condition: service_completed_successfully
+    entrypoint: ["/opt/floe/run-demo.sh"]
+    restart: "no"
 
 volumes:
   minio-data:

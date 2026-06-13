@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
+from pydantic import ValidationError
 
 from floe.config import FloeConfig
 
@@ -87,3 +89,22 @@ def test_postgres_uri_not_rewritten(tmp_path):
     cfg = FloeConfig.load(_write_config(tmp_path, data))
     # resolved_catalog_uri only rewrites relative sqlite URIs; Postgres is untouched.
     assert cfg.resolved_catalog_uri() == "postgresql+psycopg2://u:p@db:5432/floe"
+
+
+def test_default_compute_engine_is_duckdb(tmp_path):
+    cfg = FloeConfig.load(_write_config(tmp_path, _BASE_CONFIG))
+    assert cfg.compute.engine == "duckdb"
+
+
+def test_compute_engine_is_normalized_case_insensitively(tmp_path):
+    data = {**_BASE_CONFIG, "compute": {"engine": "DuckDB"}}
+    cfg = FloeConfig.load(_write_config(tmp_path, data))
+    assert cfg.compute.engine == "duckdb"
+
+
+def test_unsupported_compute_engine_is_rejected(tmp_path):
+    # Setting `engine: flink` must fail loudly rather than silently fall back to
+    # DuckDB, so users are not misled into thinking refreshes run on Flink.
+    data = {**_BASE_CONFIG, "compute": {"engine": "flink"}}
+    with pytest.raises(ValidationError, match="unsupported compute engine"):
+        FloeConfig.load(_write_config(tmp_path, data))
