@@ -84,6 +84,52 @@ vhs examples/quickstart/demo.tape
 
 ---
 
+## Run in Docker (MinIO + Postgres)
+
+The repo ships a Docker Compose stack that runs Floe as a "proper" deployment:
+an S3-compatible object store (MinIO) as the Iceberg warehouse, a Postgres-backed
+PyIceberg SQL catalog, and the Floe worker as a long-running container. This is the
+same code path as a cloud S3 + RDS deployment, just pointed at local containers.
+
+```bash
+cp .env.example .env        # adjust credentials if you like
+docker compose up --build
+```
+
+What comes up:
+
+| Service | Role |
+|---------|------|
+| `minio` | S3-compatible object store (warehouse); console at http://localhost:9001 |
+| `minio-init` | one-shot: creates the warehouse bucket |
+| `postgres` | backing store for the PyIceberg SQL catalog |
+| `floe-seed` | one-shot: loads the quickstart bronze tables |
+| `floe-apply` | one-shot: materialises every dynamic table |
+| `floe-watch` | long-running worker: refreshes DITs as upstreams change |
+
+The worker reacts to `SIGTERM`, so `docker compose down` shuts it down gracefully
+mid-poll rather than killing it.
+
+### Configuration is 12-factor
+
+The image is configured entirely through `FLOE_*` environment variables (set in
+`docker-compose.yml`), so one image runs unchanged locally, in CI, or in the cloud:
+
+| Variable | Purpose |
+|----------|---------|
+| `FLOE_CATALOG_URI` | catalog connection string (e.g. `postgresql+psycopg2://…` or `sqlite:///…`) |
+| `FLOE_WAREHOUSE` | warehouse location (`s3://bucket/prefix` or a local path) |
+| `FLOE_S3_ENDPOINT` / `FLOE_S3_ACCESS_KEY_ID` / `FLOE_S3_SECRET_ACCESS_KEY` / `FLOE_S3_REGION` | object-store access |
+| `FLOE_CATALOG_PROP__<key>` | generic PyIceberg property passthrough (`__` → `.`) |
+
+> **Why Compose and not Kubernetes?** v0.1's worker is a single, uncoordinated
+> polling loop whose change-detection state lives in memory, so running multiple
+> replicas would double-refresh. Horizontal scale-out needs the push-based event
+> bus and worker coordination on the [roadmap](#10-roadmap) (v0.2). Until then
+> Compose is the right fit; Kubernetes is the natural home once those land.
+
+---
+
 ## Table of Contents
 
 1. [The Problem](#1-the-problem)

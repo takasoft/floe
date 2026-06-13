@@ -134,3 +134,20 @@ def test_current_snapshot_id_returns_none_for_missing_table():
     snapshots: dict[str, int] = {}  # bronze.raw_orders not yet created
     watcher = Watcher(_mock_pipeline(dits, snapshots))
     assert watcher._current_snapshot_id("bronze.raw_orders") is None
+
+
+def test_run_exits_promptly_when_stopped():
+    """A stop request (as a SIGTERM would trigger) ends run() without max_iterations."""
+    dits = [_dit("silver.orders", ["bronze.raw_orders"])]
+    snapshots = {"bronze.raw_orders": 100}
+    pipeline = _mock_pipeline(dits, snapshots)
+
+    refreshed: list[str] = []
+    pipeline.executor.refresh.side_effect = lambda dit, **_kw: refreshed.append(dit.name)
+
+    # No max_iterations: the loop would run forever if stop were ignored.
+    watcher = Watcher(pipeline, WatchConfig(poll_interval_seconds=0, quiet_period_seconds=0))
+    watcher.stop()
+    watcher.run()  # returns immediately because the stop event is already set
+
+    assert refreshed == []

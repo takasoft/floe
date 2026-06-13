@@ -1,0 +1,114 @@
+# Floe Docker Compose stack
+#
+# Brings up a "proper" Floe deployment locally:
+#   - minio      : S3-compatible object store (the Iceberg warehouse)
+#   - postgres   : backing store for the PyIceberg SQL catalog
+#   - floe-seed  : one-shot, loads the quickstart bronze tables
+#   - floe-apply : one-shot, materialises the dynamic tables
+#   - floe-watch : long-running worker, refreshes DITs as upstreams change
+#
+# Usage:
+#   cp .env.example .env      # then edit secrets if you like
+#   docker compose up --build
+#
+# MinIO console: http://localhost:9001  (login with the .env credentials)
+
+name: floe
+
+# Shared Floe runtime config (12-factor: catalog + object store via env).
+x-floe-env: &floe-env
+  FLOE_CATALOG_TYPE: sql
+  FLOE_CATALOG_URI: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+  FLOE_WAREHOUSE: "s3://${FLOE_BUCKET}/wh"
+  FLOE_S3_ENDPOINT: "http://minio:9000"
+  FLOE_S3_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
+  FLOE_S3_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+  FLOE_S3_REGION: "us-east-1"
+
+x-floe-build: &floe-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  # Create the warehouse bucket once MinIO is reachable. Retries until ready,
+  # so MinIO needs no healthcheck of its own.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do
+        echo 'waiting for minio...'; sleep 2;
+      done;
+      mc mb --ignore-existing local/$$FLOE_BUCKET;
+      echo bucket ready: $$FLOE_BUCKET;
+      "
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+      FLOE_BUCKET: "${FLOE_BUCKET}"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: seed the bronze source tables into the catalog/warehouse.
+  floe-seed:
+    <<: *floe-build
+    environment: *floe-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    entrypoint: ["python"]
+    command: ["examples/quickstart/seed_sources.py"]
+    restart: "no"
+
+  # One-shot: materialise every dynamic table for the first time.
+  floe-apply:
+    <<: *floe-build
+    environment: *floe-env
+    depends_on:
+      floe-seed:
+        condition: service_completed_successfully
+    command: ["apply", "-c", "examples/quickstart/floe.yaml"]
+    restart: "no"
+
+  # Long-running worker: keep DITs fresh as upstreams receive new snapshots.
+  floe-watch:
+    <<: *floe-build
+    environment: *floe-env
+    depends_on:
+      floe-apply:
+        condition: service_completed_successfully
+    command: ["watch", "--no-ui", "-c", "examples/quickstart/floe.yaml", "--poll", "10"]
+    restart: unless-stopped
+
+volumes:
+  minio-data:
+  postgres-data:

@@ -1,0 +1,24 @@
+# Python / build noise
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# VCS & CI
+.git/
+.github/
+
+# Local catalog/warehouse state (regenerated inside containers)
+**/warehouse/
+**/.floe/
+
+# Demo recording artifacts
+*.gif
+**/demo.tape
+
+# Local env
+.env

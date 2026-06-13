@@ -36,6 +36,7 @@ class Pipeline:
             catalog_type=config.catalog.type,
             uri=config.resolved_catalog_uri(),
             warehouse=config.resolved_warehouse(),
+            properties=config.catalog.properties,
         )
         return cls(config, dits, catalog_mgr)
 

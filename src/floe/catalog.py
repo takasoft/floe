@@ -32,19 +32,26 @@ class CatalogManager:
         catalog_type: str,
         uri: str,
         warehouse: str | Path,
+        properties: dict[str, str] | None = None,
     ) -> CatalogManager:
-        warehouse_path = Path(warehouse).resolve()
-        warehouse_path.mkdir(parents=True, exist_ok=True)
-        warehouse_uri = f"file://{warehouse_path.as_posix()}"
+        warehouse_str = str(warehouse)
+        if "://" in warehouse_str:
+            # Already a URI (s3://, file://, gs://, …) — pass through untouched.
+            warehouse_uri = warehouse_str
+        else:
+            warehouse_path = Path(warehouse_str).resolve()
+            warehouse_path.mkdir(parents=True, exist_ok=True)
+            warehouse_uri = f"file://{warehouse_path.as_posix()}"
 
-        catalog = load_catalog(
-            name,
-            **{
-                "type": catalog_type,
-                "uri": uri,
-                "warehouse": warehouse_uri,
-            },
-        )
+        catalog_props: dict[str, str] = {
+            "type": catalog_type,
+            "uri": uri,
+            "warehouse": warehouse_uri,
+        }
+        if properties:
+            catalog_props.update(properties)
+
+        catalog = load_catalog(name, **catalog_props)
         return cls(catalog)
 
     @property

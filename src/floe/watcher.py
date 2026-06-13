@@ -10,6 +10,8 @@ v0.2 will replace this with a push-based event bus + catalog commit hooks.
 from __future__ import annotations
 
 import logging
+import signal
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -40,6 +42,8 @@ class Watcher:
         self.pipeline = pipeline
         self.config = config or WatchConfig()
         self.last_seen: dict[str, int | None] = {}
+        self._stop = threading.Event()
+        self._prev_handlers: dict[int, object] = {}
 
     def _current_snapshot_id(self, table_name: str) -> int | None:
         try:
@@ -127,16 +131,52 @@ class Watcher:
                 on_refresh_done(dit_name, result)
         return changed
 
+    def stop(self) -> None:
+        """Request a graceful shutdown of the polling loop."""
+        self._stop.set()
+
+    def _install_signal_handlers(self) -> None:
+        """Translate SIGTERM/SIGINT into a graceful stop (no-op off the main thread).
+
+        Containers stop a process by sending SIGTERM; without this the loop would
+        be killed mid-refresh. Setting the stop event lets the current iteration
+        finish and the loop exit cleanly. Signal registration only works on the
+        main thread, so we swallow ValueError when it doesn't.
+        """
+
+        def _handle(signum, _frame):
+            log.info("received signal %s — shutting down gracefully", signum)
+            self._stop.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                self._prev_handlers[sig] = signal.signal(sig, _handle)
+            except (ValueError, OSError):  # not main thread / unsupported platform
+                pass
+
+    def _restore_signal_handlers(self) -> None:
+        for sig, handler in self._prev_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
+        self._prev_handlers.clear()
+
     def run(self) -> None:
-        """Run the polling loop. Blocks until KeyboardInterrupt or max_iterations."""
+        """Run the polling loop. Blocks until a stop signal or max_iterations."""
         self._initialize()
+        self._install_signal_handlers()
         iter_count = 0
         try:
-            while True:
-                time.sleep(self.config.poll_interval_seconds)
+            while not self._stop.is_set():
+                # Interruptible sleep: a SIGTERM during the wait breaks out at once.
+                if self._stop.wait(self.config.poll_interval_seconds):
+                    break
                 self.step()
                 iter_count += 1
                 if self.config.max_iterations and iter_count >= self.config.max_iterations:
                     break
         except KeyboardInterrupt:
             log.info("watcher stopped by user")
+        finally:
+            self._restore_signal_handlers()

@@ -37,6 +37,7 @@ def main():
         catalog_type=config.catalog.type,
         uri=config.resolved_catalog_uri(),
         warehouse=config.resolved_warehouse(),
+        properties=config.catalog.properties,
     )
     mgr.ensure_namespace("bronze")
 

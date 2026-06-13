@@ -35,6 +35,7 @@ def main() -> None:
         catalog_type=config.catalog.type,
         uri=config.resolved_catalog_uri(),
         warehouse=config.resolved_warehouse(),
+        properties=config.catalog.properties,
     )
 
     table = mgr.catalog.load_table("bronze.delivery_defects")
