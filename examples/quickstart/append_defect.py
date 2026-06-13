@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pyarrow as pa
@@ -44,7 +44,7 @@ def main() -> None:
         "defect_type": pa.array(["customer_complaint"], type=pa.string()),
         "severity":    pa.array(["MEDIUM"], type=pa.string()),
         "reported_at": pa.array(
-            [datetime.now(timezone.utc)], type=pa.timestamp("us", tz="UTC")
+            [datetime.now(UTC)], type=pa.timestamp("us", tz="UTC")
         ),
     })
     table.append(row)

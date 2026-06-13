@@ -10,7 +10,7 @@ from pyiceberg.expressions import GreaterThanOrEqual
 
 from floe.catalog import CatalogManager
 from floe.lineage import LINEAGE_COLUMNS, inject_lineage, new_job_run_id
-from floe.models import DynamicTable, RefreshMode, RefreshResult
+from floe.models import DynamicTable, RefreshResult
 
 
 class RefreshExecutor:
@@ -25,10 +25,8 @@ class RefreshExecutor:
 
         With ``force=True`` the executor skips its "is this stale?" short-circuit
         and always re-runs the underlying query. The watcher uses this because it
-        has already detected the upstream change that motivated the refresh — its
-        primary-upstream-only staleness check would otherwise miss changes to
-        non-primary upstreams (e.g. a defect appended to ``bronze.delivery_defects``
-        for a DIT whose primary upstream is ``silver.deliveries_enriched``).
+        has already detected the upstream change that motivated the refresh, so
+        re-checking staleness would be redundant work.
         """
         started_at = datetime.now(UTC)
         job_run_id = new_job_run_id()
@@ -42,7 +40,6 @@ class RefreshExecutor:
     def _refresh_unpartitioned(
         self, dit: DynamicTable, started_at: datetime, job_run_id: str, *, force: bool = False
     ) -> RefreshResult:
-        effective_mode = self._resolve_mode(dit)
         primary_upstream = self._primary_upstream(dit)
         upstream_snapshot_id = (
             self.catalog_mgr.current_snapshot_id(primary_upstream)
@@ -50,20 +47,15 @@ class RefreshExecutor:
             else None
         )
 
-        if not force and effective_mode == RefreshMode.INCREMENTAL and primary_upstream:
-            last_processed = (
-                self.catalog_mgr.get_checkpoint(dit.name)
-                if self.catalog_mgr.table_exists(dit.name)
-                else None
-            )
-            if (
-                upstream_snapshot_id is not None
-                and last_processed is not None
-                and upstream_snapshot_id == last_processed
-            ):
+        table_exists = self.catalog_mgr.table_exists(dit.name)
+        current_upstreams = self._current_upstream_snapshots(dit)
+
+        if not force and table_exists:
+            last_upstreams = self.catalog_mgr.get_upstream_checkpoints(dit.name)
+            if last_upstreams is not None and last_upstreams == current_upstreams:
                 return RefreshResult(
                     table=dit.name,
-                    mode=effective_mode,
+                    mode=dit.refresh_mode,
                     rows_written=0,
                     input_snapshot_id=upstream_snapshot_id,
                     output_snapshot_id=self.catalog_mgr.current_snapshot_id(dit.name),
@@ -74,29 +66,33 @@ class RefreshExecutor:
                     skip_reason="upstream snapshot unchanged",
                 )
 
-        result_arrow = self._execute_query(dit, effective_mode, primary_upstream)
+        # We always recompute the full result from the current upstream snapshots
+        # and replace the table contents. This is idempotent for every query shape
+        # (pass-through, join, or aggregation): re-running can never duplicate or
+        # double-count rows. True delta-based incremental append is deferred to the
+        # Flink compute layer on the roadmap; DuckDB recompute-and-replace is the
+        # correct v0.1 behaviour for both INCREMENTAL and FULL unpartitioned tables.
+        result_arrow = self._execute_query(dit)
         result_with_lineage = inject_lineage(
             result_arrow,
             input_snapshot_id=upstream_snapshot_id,
             job_run_id=job_run_id,
-            refresh_mode=effective_mode.value,
+            refresh_mode=dit.refresh_mode.value,
         )
 
-        if not self.catalog_mgr.table_exists(dit.name):
+        if not table_exists:
             self.catalog_mgr.ensure_namespace(dit.namespace)
             self.catalog_mgr.catalog.create_table(dit.name, schema=result_with_lineage.schema)
 
-        if effective_mode == RefreshMode.FULL:
-            self.catalog_mgr.overwrite(dit.name, result_with_lineage)
-        else:
-            self.catalog_mgr.append(dit.name, result_with_lineage)
+        self.catalog_mgr.overwrite(dit.name, result_with_lineage)
 
+        self.catalog_mgr.set_upstream_checkpoints(dit.name, current_upstreams)
         if upstream_snapshot_id is not None:
             self.catalog_mgr.set_checkpoint(dit.name, upstream_snapshot_id)
 
         return RefreshResult(
             table=dit.name,
-            mode=effective_mode,
+            mode=dit.refresh_mode,
             rows_written=result_with_lineage.num_rows,
             input_snapshot_id=upstream_snapshot_id,
             output_snapshot_id=self.catalog_mgr.current_snapshot_id(dit.name),
@@ -120,12 +116,15 @@ class RefreshExecutor:
         )
 
         table_exists = self.catalog_mgr.table_exists(dit.name)
-        last_processed = self.catalog_mgr.get_checkpoint(dit.name) if table_exists else None
+        current_upstreams = self._current_upstream_snapshots(dit)
+        last_upstreams = (
+            self.catalog_mgr.get_upstream_checkpoints(dit.name) if table_exists else None
+        )
         last_window_refresh = (
             self.catalog_mgr.get_window_refreshed_at(dit.name) if table_exists else None
         )
 
-        upstream_changed = upstream_snap is not None and last_processed != upstream_snap
+        upstream_changed = last_upstreams is None or last_upstreams != current_upstreams
 
         window_stale = False
         freshness_secs = dit.partition_freshness_seconds()
@@ -153,9 +152,7 @@ class RefreshExecutor:
         cutoff = self._compute_window_cutoff(dit)
 
         # Compute the (possibly windowed) result.
-        result_arrow = self._execute_query(
-            dit, RefreshMode.FULL, primary_upstream, window_filter=(partition_col, cutoff)
-        )
+        result_arrow = self._execute_query(dit, window_filter=(partition_col, cutoff))
         result_with_lineage = inject_lineage(
             result_arrow,
             input_snapshot_id=upstream_snap,
@@ -179,6 +176,7 @@ class RefreshExecutor:
 
         if upstream_snap is not None:
             self.catalog_mgr.set_checkpoint(dit.name, upstream_snap)
+        self.catalog_mgr.set_upstream_checkpoints(dit.name, current_upstreams)
         self.catalog_mgr.set_window_refreshed_at(dit.name, datetime.now(UTC))
 
         return RefreshResult(
@@ -198,11 +196,20 @@ class RefreshExecutor:
             return None
         return (datetime.now(UTC) - timedelta(seconds=secs)).date()
 
-    def _resolve_mode(self, dit: DynamicTable) -> RefreshMode:
-        # If the output table doesn't exist yet, we must do a FULL build first.
-        if not self.catalog_mgr.table_exists(dit.name):
-            return RefreshMode.FULL
-        return dit.refresh_mode
+    def _current_upstream_snapshots(self, dit: DynamicTable) -> dict[str, int]:
+        """Snapshot the current snapshot ID of every existing upstream table.
+
+        Upstreams that don't exist yet, or that have no snapshot, are omitted —
+        their later appearance is itself a change that flips staleness.
+        """
+        snaps: dict[str, int] = {}
+        for upstream in dit.upstream_tables:
+            if not self.catalog_mgr.table_exists(upstream):
+                continue
+            sid = self.catalog_mgr.current_snapshot_id(upstream)
+            if sid is not None:
+                snaps[upstream] = sid
+        return snaps
 
     def _primary_upstream(self, dit: DynamicTable) -> str | None:
         if not dit.upstream_tables:
@@ -213,12 +220,15 @@ class RefreshExecutor:
     def _execute_query(
         self,
         dit: DynamicTable,
-        mode: RefreshMode,
-        primary_upstream: str | None,
         *,
         window_filter: tuple[str, date | None] | None = None,
     ) -> pa.Table:
         """Execute the DIT's SQL query in DuckDB against current Iceberg snapshots.
+
+        Every upstream is read at its current snapshot; the full result is then
+        recomputed. Callers decide whether to overwrite (unpartitioned) or
+        window-overwrite (partitioned) the output — so this method never needs to
+        read incremental deltas, which keeps it correct for joins and aggregations.
 
         If ``window_filter`` is ``(column, cutoff_date)``, the cutoff is applied at
         two layers:
@@ -243,12 +253,7 @@ class RefreshExecutor:
                     )
 
                 row_filter = self._upstream_row_filter(upstream, window_filter)
-                arrow_table = self._read_upstream(
-                    upstream,
-                    incremental=(mode == RefreshMode.INCREMENTAL and upstream == primary_upstream),
-                    target_dit=dit.name,
-                    row_filter=row_filter,
-                )
+                arrow_table = self._read_upstream(upstream, row_filter=row_filter)
                 con.register(_view_alias(upstream), arrow_table)
 
             rewritten = _rewrite_table_names(dit.query, dit.upstream_tables)
@@ -283,33 +288,12 @@ class RefreshExecutor:
             return None
         return GreaterThanOrEqual(col, cutoff.isoformat())
 
-    def _read_upstream(
-        self,
-        name: str,
-        *,
-        incremental: bool,
-        target_dit: str,
-        row_filter=None,
-    ) -> pa.Table:
-        """Read an upstream Iceberg table, optionally incrementally and/or row-filtered."""
+    def _read_upstream(self, name: str, *, row_filter=None) -> pa.Table:
+        """Read an upstream Iceberg table at its current snapshot, optionally row-filtered."""
         table = self.catalog_mgr.load_table(name)
-        current_snap = table.current_snapshot()
-        if current_snap is None:
+        if table.current_snapshot() is None:
             return pa.table({})  # empty
-
-        last_processed = (
-            self.catalog_mgr.get_checkpoint(target_dit)
-            if self.catalog_mgr.table_exists(target_dit)
-            else None
-        )
-
         scan_kwargs = {"row_filter": row_filter} if row_filter is not None else {}
-
-        if incremental and last_processed and last_processed != current_snap.snapshot_id:
-            try:
-                return table.scan(**scan_kwargs).use_ref(current_snap.snapshot_id).to_arrow()
-            except Exception:
-                return table.scan(**scan_kwargs).to_arrow()
         return table.scan(**scan_kwargs).to_arrow()
 
 

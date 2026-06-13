@@ -115,11 +115,8 @@ class Watcher:
                 on_refresh_start(dit_name)
             try:
                 # force=True: the watcher has already detected the upstream
-                # change that motivated this refresh, so bypass the executor's
-                # primary-upstream-only staleness check (which would otherwise
-                # miss changes to non-primary upstreams like a defect appended
-                # to bronze.delivery_defects for a DIT whose primary upstream
-                # is silver.deliveries_enriched).
+                # change that motivated this refresh, so skip the executor's
+                # staleness short-circuit and recompute unconditionally.
                 result = self.pipeline.executor.refresh(self.pipeline.dits[dit_name], force=True)
             except Exception as exc:  # noqa: BLE001 -- engine errors vary
                 log.exception("refresh failed for %s", dit_name)

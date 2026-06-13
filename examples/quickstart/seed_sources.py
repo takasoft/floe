@@ -15,7 +15,7 @@ sliding-window freshness contract: only the last 14 day-partitions are kept fres
 Dates are today-relative so the example always sits across the freshness window.
 """
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -27,7 +27,7 @@ CONFIG_PATH = Path(__file__).parent / "floe.yaml"
 
 
 def _ts(d: date, hour: int, minute: int = 0) -> datetime:
-    return datetime.combine(d, time(hour, minute), tzinfo=timezone.utc)
+    return datetime.combine(d, time(hour, minute), tzinfo=UTC)
 
 
 def main():
@@ -40,7 +40,7 @@ def main():
     )
     mgr.ensure_namespace("bronze")
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     days_ago = lambda n: today - timedelta(days=n)  # noqa: E731
 
     delivery_associates = pa.table({

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pyarrow as pa
@@ -47,7 +47,7 @@ def main() -> None:
             "da_id": pa.array([da_id], type=pa.string()),
             "route_id": pa.array([route_id], type=pa.string()),
             "delivered_at": pa.array(
-                [datetime.now(timezone.utc)], type=pa.timestamp("us", tz="UTC")
+                [datetime.now(UTC)], type=pa.timestamp("us", tz="UTC")
             ),
             "on_time": pa.array([True], type=pa.bool_()),
             "delivery_seconds": pa.array([3600], type=pa.int64()),

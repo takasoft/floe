@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from pyiceberg.table import Table
 from pyiceberg.transforms import IdentityTransform
 
 CHECKPOINT_PROPERTY = "floe.last_processed_snapshot_id"
+UPSTREAM_CHECKPOINTS_PROPERTY = "floe.last_processed_snapshots"
 SOURCE_TABLE_PROPERTY = "floe.source_table"
 WINDOW_REFRESHED_AT_PROPERTY = "floe.window_last_refreshed_at"
 
@@ -127,6 +129,30 @@ class CatalogManager:
         table = self._catalog.load_table(name)
         with table.transaction() as txn:
             txn.set_properties({CHECKPOINT_PROPERTY: str(snapshot_id)})
+
+    def get_upstream_checkpoints(self, name: str) -> dict[str, int] | None:
+        """Return the per-upstream snapshot IDs processed by the last refresh.
+
+        Unlike :meth:`get_checkpoint` (which tracks only the primary upstream),
+        this captures *every* upstream so the executor can detect changes to any
+        of them — e.g. a late-arriving defect appended to a secondary upstream.
+        Returns ``None`` if the table has never been refreshed by Floe.
+        """
+        table = self._catalog.load_table(name)
+        val = table.properties.get(UPSTREAM_CHECKPOINTS_PROPERTY)
+        if not val:
+            return None
+        try:
+            data = json.loads(val)
+            return {str(k): int(v) for k, v in data.items()}
+        except (ValueError, TypeError):
+            return None
+
+    def set_upstream_checkpoints(self, name: str, mapping: dict[str, int]) -> None:
+        table = self._catalog.load_table(name)
+        payload = json.dumps({k: str(v) for k, v in mapping.items()}, sort_keys=True)
+        with table.transaction() as txn:
+            txn.set_properties({UPSTREAM_CHECKPOINTS_PROPERTY: payload})
 
     def get_window_refreshed_at(self, name: str) -> datetime | None:
         table = self._catalog.load_table(name)

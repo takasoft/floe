@@ -42,7 +42,8 @@ The vision is to bring Snowflake-style Dynamic Tables to Apache Iceberg, without
 
 - **Declarative** — define *what* you want, not *how* to refresh it
 - **Iceberg-native** — pure open table format; works with any Iceberg-compatible reader (Trino, DuckDB, Spark)
-- **Incremental and full refresh** with partition-aware windowing
+- **Partition-windowed incremental refresh** — partitioned tables rewrite only the in-window partitions when upstreams change; unpartitioned tables recompute-and-replace idempotently (true snapshot-diff incremental is on the roadmap)
+- **Full refresh** for complete recomputes
 - **Event-driven refresh via polling** — `floe watch` keeps derived tables fresh as upstream Iceberg tables receive new snapshots
 - **Automatic lineage injection** — every row in a derived table carries `_floe_input_snapshot_id` and `_floe_job_run_id` columns
 - **Stateless workers** — all state lives in Iceberg snapshots; no external state stores
@@ -248,6 +249,8 @@ CREATE DYNAMIC TABLE silver.orders
 | `SCHEDULED` | Time-based (cron expression), ignores commit events | External data sources without Iceberg commits |
 
 Floe automatically degrades to `FULL` if the DAG Planner determines `INCREMENTAL` is not safe for the given query.
+
+> **v0.1 implementation:** `TRIGGERED` and `SCHEDULED` are roadmap modes. Today `INCREMENTAL` does not yet read Iceberg snapshot diffs — for *partitioned* tables it rewrites only the in-window partitions (a partition-level incremental), and for *unpartitioned* tables it recomputes the full result and replaces the table. Recompute-and-replace is idempotent for every query shape (joins, aggregations), so refreshes never duplicate or double-count rows. The snapshot-diff delta merge described above lands with the Flink compute layer in v0.2.
 
 ### 3.3 Partition-Aware Freshness
 

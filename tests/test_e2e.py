@@ -323,6 +323,135 @@ def test_partitioned_refresh_replaces_only_in_window(project_dir, floe_config, c
     assert old_date in dates, "old partition was wiped by refresh — overwrite filter is too broad"
 
 
+def test_incremental_no_duplicates_on_upstream_append(
+    project_dir, floe_config, catalog_mgr, sample_orders, sample_customers
+):
+    """An INCREMENTAL pass-through DIT must not duplicate rows when its upstream grows.
+
+    Regression test: the executor previously full-scanned the upstream and
+    *appended* the whole result on every change, so a 3-row upstream that gained
+    2 rows produced an 8-row (3 + 5) output instead of 5. Refresh now recomputes
+    and overwrites, so the output always mirrors the current upstream exactly.
+    """
+    _seed_source_tables(catalog_mgr, sample_orders, sample_customers)
+
+    _write_dit_file(
+        project_dir / "transformations",
+        "silver_orders",
+        """
+        CREATE DYNAMIC TABLE silver.orders
+          REFRESH_MODE = 'INCREMENTAL'
+          AS
+          SELECT order_id, amount FROM bronze.raw_orders;
+        """,
+    )
+
+    from floe.parser import load_dits
+
+    dits = load_dits(project_dir / "transformations")
+    pipeline = Pipeline(floe_config, dits, catalog_mgr)
+
+    first = pipeline.refresh_all()[0]
+    assert first.rows_written == 3
+    assert not first.skipped
+
+    # Upstream grows by two rows.
+    catalog_mgr.append(
+        "bronze.raw_orders",
+        pa.table(
+            {
+                "order_id": pa.array([4, 5], type=pa.int64()),
+                "customer_id": pa.array([100, 101], type=pa.int64()),
+                "amount": pa.array([3.0, 8.0], type=pa.float64()),
+            }
+        ),
+    )
+
+    second = pipeline.refresh_all()[0]
+    assert not second.skipped, "upstream changed; refresh must not skip"
+
+    out = catalog_mgr.load_table("silver.orders").scan().to_arrow()
+    assert out.num_rows == 5, "output should mirror upstream (5 rows), not accumulate duplicates"
+    order_ids = sorted(out["order_id"].to_pylist())
+    assert order_ids == [1, 2, 3, 4, 5]
+
+
+def test_incremental_detects_secondary_upstream_change(
+    project_dir, floe_config, catalog_mgr, sample_orders, sample_customers
+):
+    """`floe apply` must refresh when a *non-primary* upstream changes.
+
+    The primary upstream (first in the FROM clause) is unchanged here; only the
+    joined `customers` table gains a row. The staleness check tracks every
+    upstream, so the refresh fires instead of being skipped.
+    """
+    _seed_source_tables(catalog_mgr, sample_orders, sample_customers)
+
+    _write_dit_file(
+        project_dir / "transformations",
+        "silver_orders",
+        """
+        CREATE DYNAMIC TABLE silver.orders
+          REFRESH_MODE = 'INCREMENTAL'
+          AS
+          SELECT o.order_id, o.amount, c.region
+          FROM bronze.raw_orders o
+          JOIN bronze.customers c ON o.customer_id = c.id;
+        """,
+    )
+
+    from floe.parser import load_dits
+
+    dits = load_dits(project_dir / "transformations")
+    pipeline = Pipeline(floe_config, dits, catalog_mgr)
+
+    pipeline.refresh_all()
+
+    # Add a customer for a previously-unmatched order (order 2 → customer 101 exists;
+    # add customer 102 and an order referencing it so the join result grows).
+    catalog_mgr.append(
+        "bronze.customers",
+        pa.table(
+            {
+                "id": pa.array([102], type=pa.int64()),
+                "region": pa.array(["eu-west"], type=pa.string()),
+            }
+        ),
+    )
+    catalog_mgr.append(
+        "bronze.raw_orders",
+        pa.table(
+            {
+                "order_id": pa.array([4], type=pa.int64()),
+                "customer_id": pa.array([102], type=pa.int64()),
+                "amount": pa.array([9.0], type=pa.float64()),
+            }
+        ),
+    )
+    # Refresh once so both upstreams are accounted for.
+    pipeline.refresh_all()
+
+    # Refresh once so both upstreams are accounted for.
+    pipeline.refresh_all()
+
+    # No upstream changed since the last refresh → skipped.
+    assert pipeline.refresh_all()[0].skipped
+
+    # Change ONLY the secondary upstream (customers). Staleness tracks every
+    # upstream, so this must trigger a refresh rather than being skipped.
+    catalog_mgr.append(
+        "bronze.customers",
+        pa.table(
+            {
+                "id": pa.array([103], type=pa.int64()),
+                "region": pa.array(["ap-south"], type=pa.string()),
+            }
+        ),
+    )
+    after_secondary = pipeline.refresh_all()[0]
+    assert not after_secondary.skipped, "secondary upstream changed; refresh must not skip"
+
+
 def test_lineage_snapshot_id_recorded(
     project_dir, floe_config, catalog_mgr, sample_orders, sample_customers
 ):
