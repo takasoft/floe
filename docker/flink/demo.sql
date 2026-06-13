@@ -11,6 +11,9 @@
 -- container exits only after the gold table is actually populated.
 SET 'table.dml-sync' = 'true';
 
+-- Render the trailing SELECT as a table in non-interactive (one-shot) mode.
+SET 'sql-client.execution.result-mode' = 'TABLEAU';
+
 SHOW DATABASES;
 
 CREATE DATABASE IF NOT EXISTS gold;
