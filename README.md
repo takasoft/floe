@@ -166,7 +166,7 @@ backend.
 
 ### Dashboards and observability
 
-Four live views let you watch the system as it runs:
+Five web views let you watch and query the system as it runs:
 
 | What you want to see | Where | How to open |
 |----------------------|-------|-------------|
@@ -174,6 +174,7 @@ Four live views let you watch the system as it runs:
 | **The Iceberg warehouse** (buckets, data files, manifests, and metadata as new snapshots commit) | MinIO console | http://localhost:9001 (log in with the `.env` credentials) |
 | **Flink jobs** (operators, records in and out, backpressure, checkpoints, task slots) | Flink Web UI | http://localhost:8081 (requires the `flink` profile) |
 | **The containers themselves** (live, searchable logs and CPU / memory stats, grouped by Compose service) | Dozzle, an opt-in container UI | `docker compose --profile ui up -d dozzle`, then http://localhost:8888 |
+| **Query the tables with SQL** (ad-hoc queries, row previews, snapshot history, time travel, charts) | Metabase, an opt-in web SQL workbench backed by Trino | `docker compose --profile sql up -d`, then http://localhost:3000 (see [Inspecting a table](#inspecting-a-table)) |
 
 Start with `floe watch`: it renders the DAG and refreshes each downstream table
 live as Floe detects new upstream Iceberg snapshots (the GIF at the top of this
@@ -217,14 +218,45 @@ pyiceberg --catalog quickstart files    silver.deliveries_enriched     # the Par
 snapshots (every refresh commits one), so it doubles as the table's version
 history and audit trail.
 
-For ad-hoc SQL, row previews, per-snapshot row counts, or time travel, query the
-table with **DuckDB** (also already a dependency; it has a built-in browser UI
-via `duckdb -ui`) through its
-[`iceberg` extension](https://duckdb.org/docs/stable/extensions/iceberg), or
-stand up **Trino** with its Iceberg connector for a shared SQL endpoint exposing
-`$snapshots`, `$history`, and `$files` metadata tables and `FOR VERSION AS OF`
-time travel. All three read the same Iceberg metadata, so no Floe-specific
-tooling is required.
+For ad-hoc SQL in a browser, the optional `sql` profile starts a complete
+open-source SQL workbench over the very same tables, again with no Floe-specific
+code: **Trino** (its Iceberg connector reads the shared Postgres catalog and
+MinIO warehouse) fronted by **Metabase** (a web SQL editor and charting UI that
+ships a Trino driver):
+
+```bash
+docker compose --profile sql up -d
+# Metabase (web SQL editor + charts): http://localhost:3000
+# Trino   (its own query/cluster UI): http://localhost:8080
+```
+
+On Metabase's first run, create an account, then add a database of type
+**Starburst** with host `trino`, port `8080`, catalog `iceberg`, username
+`metabase`, and no password. You can then query the tables from the browser:
+
+```sql
+-- on-time rate by region
+SELECT region, count(*) AS deliveries,
+       round(100.0 * sum(if(on_time, 1, 0)) / count(*), 1) AS pct_on_time
+FROM iceberg.silver.deliveries_enriched
+GROUP BY region ORDER BY deliveries DESC;
+
+-- version history / audit trail (one commit per refresh)
+SELECT committed_at, operation, summary['total-records'] AS rows
+FROM iceberg.silver."deliveries_enriched$snapshots"
+ORDER BY committed_at DESC;
+
+-- time travel: read the table as of an older snapshot
+SELECT count(*) FROM iceberg.silver.deliveries_enriched
+FOR VERSION AS OF <snapshot_id>;
+```
+
+Trino's Iceberg connector also exposes `$history` and `$files` metadata tables.
+Prefer the terminal? **DuckDB** is already a Floe dependency and has its own
+browser UI (`duckdb -ui`) plus an
+[`iceberg` extension](https://duckdb.org/docs/stable/extensions/iceberg). Every
+option here reads the same Iceberg metadata, so none of them needs anything
+specific to Floe.
 
 ---
 

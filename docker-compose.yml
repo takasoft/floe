@@ -14,8 +14,12 @@
 #   # Optional, experimental: also run Flink against the same Iceberg tables
 #   docker compose --profile flink up --build
 #
+#   # Optional: a browser SQL workbench (Trino + Metabase) over Floe's tables
+#   docker compose --profile sql up -d
+#
 # MinIO console: http://localhost:9001  (login with the .env credentials)
 # Flink dashboard (flink profile): http://localhost:8081
+# SQL workbench (sql profile): http://localhost:3000 (Metabase), :8080 (Trino)
 
 name: floe
 
@@ -216,6 +220,64 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
+  # --- SQL workbench profile (opt-in) ----------------------------------------
+  # A browser-based SQL workbench over the EXACT Iceberg tables Floe manages, so
+  # you can query them like a database (ad-hoc SQL, row previews, snapshot
+  # metadata, time travel) instead of reading raw Parquet blobs in the MinIO
+  # console. Two off-the-shelf, open-source pieces; no Floe-specific code:
+  #   - trino    : query engine. Its Iceberg connector points at the SAME
+  #                Postgres catalog and MinIO warehouse the rest of the stack
+  #                uses (docker/trino/catalog/iceberg.properties). UI on :8080.
+  #   - metabase : web SQL editor + charts; ships a Starburst (Trino) driver.
+  #
+  # Start with:  docker compose --profile sql up -d
+  # Then open:   http://localhost:3000  (Metabase)
+  #         and  http://localhost:8080  (Trino's own query UI)
+  # First run only: in Metabase, add a database of type "Starburst" with host
+  #   `trino`, port `8080`, catalog `iceberg`, username `metabase`, no password.
+  # Combine with other profiles, e.g.:  docker compose --profile sql --profile ui up
+  trino:
+    image: trinodb/trino:468
+    profiles: ["sql"]
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB}"
+      FLOE_BUCKET: "${FLOE_BUCKET}"
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/trino/catalog:/etc/trino/catalog:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  metabase:
+    image: metabase/metabase:latest
+    profiles: ["sql"]
+    environment:
+      # Persist Metabase's own app DB (users, saved questions, and the Trino
+      # connection) to a volume so the one-time first-run setup survives restarts.
+      MB_DB_FILE: /metabase-data/metabase.db
+    ports:
+      - "3000:3000"
+    volumes:
+      - metabase-data:/metabase-data
+    depends_on:
+      trino:
+        condition: service_healthy
+
 volumes:
   minio-data:
   postgres-data:
+  metabase-data:
