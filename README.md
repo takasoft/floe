@@ -164,6 +164,25 @@ experimental: the moving part to watch on first run is interoperability between
 PyIceberg's `SqlCatalog` and Flink's `JdbcCatalog` over the shared Postgres
 backend.
 
+### Dashboards and observability
+
+Four live views let you watch the system as it runs:
+
+| What you want to see | Where | How to open |
+|----------------------|-------|-------------|
+| **Table updates in real time** (the pipeline DAG, per-table status, snapshot IDs, lineage trace, and a rolling event log) | Floe's own terminal dashboard | run `floe watch`, or `python examples/quickstart/demo_runner.py` for a scripted demo |
+| **The Iceberg warehouse** (buckets, data files, manifests, and metadata as new snapshots commit) | MinIO console | http://localhost:9001 (log in with the `.env` credentials) |
+| **Flink jobs** (operators, records in and out, backpressure, checkpoints, task slots) | Flink Web UI | http://localhost:8081 (requires the `flink` profile) |
+| **The containers themselves** (live, searchable logs and CPU / memory stats, grouped by Compose service) | Dozzle, an opt-in container UI | `docker compose --profile ui up -d dozzle`, then http://localhost:8888 |
+
+Start with `floe watch`: it renders the DAG and refreshes each downstream table
+live as Floe detects new upstream Iceberg snapshots (the GIF at the top of this
+README is exactly this dashboard). The container UI is handy when you run Docker
+headless (for example Docker Engine in WSL2) and so don't have Docker Desktop's
+built-in Compose view; if you do run Docker Desktop, its Containers tab already
+shows this Compose project. Dozzle is read-only and stores nothing, so it is safe
+to leave running alongside the stack.
+
 ---
 
 ## Table of Contents

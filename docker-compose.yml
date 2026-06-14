@@ -195,6 +195,27 @@ services:
     entrypoint: ["/opt/floe/run-demo.sh"]
     restart: "no"
 
+  # --- Container observability UI (opt-in) -----------------------------------
+  # A lightweight, read-only web dashboard for watching every container in this
+  # Compose project in real time: live, searchable logs and CPU / memory / network
+  # stats, grouped by Compose service. Useful when you run the engine headless
+  # (for example Docker Engine in WSL2) and so don't have Docker Desktop's own
+  # Compose view. It only needs the Docker socket mounted read-only; it manages
+  # nothing and stores nothing.
+  #
+  # Start with:  docker compose --profile ui up -d dozzle
+  # Then open:   http://localhost:8888
+  # Combine with other profiles, e.g.:  docker compose --profile flink --profile ui up
+  dozzle:
+    image: amir20/dozzle:latest
+    profiles: ["ui"]
+    environment:
+      DOZZLE_NO_ANALYTICS: "true"
+    ports:
+      - "8888:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
 volumes:
   minio-data:
   postgres-data:
