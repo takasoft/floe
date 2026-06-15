@@ -103,8 +103,83 @@ def test_compute_engine_is_normalized_case_insensitively(tmp_path):
 
 
 def test_unsupported_compute_engine_is_rejected(tmp_path):
-    # Setting `engine: flink` must fail loudly rather than silently fall back to
-    # DuckDB, so users are not misled into thinking refreshes run on Flink.
-    data = {**_BASE_CONFIG, "compute": {"engine": "flink"}}
+    # An engine Floe has no executor for must fail loudly rather than silently
+    # falling back to DuckDB, so users are not misled about where refreshes run.
+    data = {**_BASE_CONFIG, "compute": {"engine": "spark"}}
     with pytest.raises(ValidationError, match="unsupported compute engine"):
         FloeConfig.load(_write_config(tmp_path, data))
+
+
+def test_flink_engine_is_accepted(tmp_path):
+    data = {**_BASE_CONFIG, "compute": {"engine": "flink"}}
+    cfg = FloeConfig.load(_write_config(tmp_path, data))
+    assert cfg.compute.engine == "flink"
+    # The engine always gets a usable Flink config block.
+    assert cfg.compute.flink is not None
+    assert cfg.compute.flink.sql_gateway_url.startswith("http")
+
+
+def test_default_trigger_is_poll(tmp_path):
+    cfg = FloeConfig.load(_write_config(tmp_path, _BASE_CONFIG))
+    assert cfg.compute.trigger == "poll"
+
+
+def test_push_trigger_requires_flink_engine(tmp_path):
+    # push is event-driven streaming; it is implemented on Flink only.
+    data = {**_BASE_CONFIG, "compute": {"engine": "duckdb", "trigger": "push"}}
+    with pytest.raises(ValidationError, match="requires the 'flink' compute engine"):
+        FloeConfig.load(_write_config(tmp_path, data))
+
+
+def test_push_trigger_with_flink_is_accepted(tmp_path):
+    data = {**_BASE_CONFIG, "compute": {"engine": "flink", "trigger": "push"}}
+    cfg = FloeConfig.load(_write_config(tmp_path, data))
+    assert cfg.compute.engine == "flink"
+    assert cfg.compute.trigger == "push"
+
+
+def test_unsupported_trigger_is_rejected(tmp_path):
+    data = {**_BASE_CONFIG, "compute": {"engine": "duckdb", "trigger": "webhook"}}
+    with pytest.raises(ValidationError, match="unsupported refresh trigger"):
+        FloeConfig.load(_write_config(tmp_path, data))
+
+
+def test_compute_env_overrides_select_engine_and_trigger(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOE_COMPUTE_ENGINE", "flink")
+    monkeypatch.setenv("FLOE_COMPUTE_TRIGGER", "push")
+    monkeypatch.setenv("FLOE_FLINK_SQL_GATEWAY_URL", "http://flink-sql-gateway:8083")
+    cfg = FloeConfig.load(_write_config(tmp_path, _BASE_CONFIG))
+    assert cfg.compute.engine == "flink"
+    assert cfg.compute.trigger == "push"
+    assert cfg.compute.flink.sql_gateway_url == "http://flink-sql-gateway:8083"
+
+
+def test_flink_jdbc_uri_derived_from_postgres_catalog(tmp_path):
+    data = {
+        **_BASE_CONFIG,
+        "project": "quickstart",
+        "compute": {"engine": "flink"},
+        "catalog": {
+            "type": "sql",
+            "uri": "postgresql+psycopg2://floe:secret@postgres:5432/floe",
+            "warehouse": "s3://floe-warehouse/wh",
+        },
+    }
+    cfg = FloeConfig.load(_write_config(tmp_path, data))
+    jdbc_uri, user, password = cfg.flink_jdbc()
+    assert jdbc_uri == "jdbc:postgresql://postgres:5432/floe"
+    assert user == "floe"
+    assert password == "secret"
+    assert cfg.flink_catalog_name() == "quickstart"
+    props = cfg.flink_catalog_properties()
+    assert props["type"] == "iceberg"
+    assert props["catalog-impl"] == "org.apache.iceberg.jdbc.JdbcCatalog"
+    assert props["warehouse"] == "s3://floe-warehouse/wh"
+
+
+def test_flink_engine_rejects_non_postgres_catalog_for_jdbc(tmp_path):
+    # A local sqlite catalog cannot back Flink's JdbcCatalog; surface a clear error.
+    data = {**_BASE_CONFIG, "compute": {"engine": "flink"}}
+    cfg = FloeConfig.load(_write_config(tmp_path, data))
+    with pytest.raises(ValueError, match="Postgres JDBC catalog"):
+        cfg.flink_jdbc()

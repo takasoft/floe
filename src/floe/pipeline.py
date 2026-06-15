@@ -6,7 +6,7 @@ from pathlib import Path
 
 from floe.catalog import CatalogManager
 from floe.config import FloeConfig
-from floe.executor import RefreshExecutor
+from floe.engine import Executor, make_executor
 from floe.models import DynamicTable, RefreshResult
 from floe.parser import load_dits
 from floe.planner import DAGPlanner
@@ -25,7 +25,7 @@ class Pipeline:
         self.dits = {d.name: d for d in dits}
         self.planner = DAGPlanner(dits)
         self.catalog_mgr = catalog_mgr
-        self.executor = RefreshExecutor(catalog_mgr, self.dits)
+        self.executor: Executor = make_executor(config, catalog_mgr, self.dits)
 
     @classmethod
     def from_config(cls, config_path: str | Path) -> Pipeline:

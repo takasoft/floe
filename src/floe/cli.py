@@ -78,6 +78,10 @@ def plan(config: Path = typer.Option(Path(DEFAULT_CONFIG), "--config", "-c")):
 def apply(config: Path = typer.Option(Path(DEFAULT_CONFIG), "--config", "-c")):
     """Refresh every DIT in topological order."""
     pipeline = Pipeline.from_config(config)
+    console.print(
+        f"[bold]Engine:[/bold] {pipeline.config.compute.engine}    "
+        f"[bold]Trigger:[/bold] {pipeline.config.compute.trigger}"
+    )
     results = pipeline.refresh_all()
 
     t = RichTable(title="Refresh Results")
@@ -179,6 +183,24 @@ def watch(
     from floe.watcher import WatchConfig, Watcher
 
     pipeline = Pipeline.from_config(config)
+
+    trigger = pipeline.config.compute.trigger
+    if trigger == "push":
+        # The push (event-driven streaming) runner is the next milestone: a
+        # long-running Flink streaming job per DIT, driven by upstream Iceberg
+        # commits instead of polling. Until it lands, fail clearly rather than
+        # silently falling back to polling.
+        console.print(
+            "[yellow]trigger: push (event-driven Flink streaming) is not yet "
+            "available in this release.[/yellow]"
+        )
+        console.print(
+            "It is the next milestone (the Flink streaming runner). Set "
+            "trigger: poll for now — polling already drives the configured "
+            f"engine ([bold]{pipeline.config.compute.engine}[/bold])."
+        )
+        raise typer.Exit(1)
+
     sources = pipeline.planner.external_sources()
     if not sources:
         console.print("[yellow]No external upstream sources found in this pipeline.[/yellow]")
@@ -195,7 +217,10 @@ def watch(
 
         run_dashboard(pipeline, watcher, poll_interval)
     else:
-        console.print(f"[bold]Watching[/bold] {len(sources)} upstream source(s):")
+        console.print(
+            f"[bold]Watching[/bold] {len(sources)} upstream source(s) "
+            f"(engine: {pipeline.config.compute.engine}, trigger: poll):"
+        )
         for s in sources:
             console.print(f"  - {s}")
         console.print(f"Polling every {poll_interval}s. Press Ctrl+C to stop.")

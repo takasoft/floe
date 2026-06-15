@@ -1,4 +1,10 @@
-"""Refresh executor — runs DIT queries via DuckDB and writes to Iceberg."""
+"""DuckDB refresh executor — runs DIT queries via DuckDB and writes to Iceberg.
+
+This is Floe's default compute engine. It implements the structural ``Executor``
+interface (see :mod:`floe.engine`): ``refresh(dit, *, force=False) -> RefreshResult``.
+An alternative ``flink`` engine implementing the same interface lives in
+:mod:`floe.flink_executor`; the engine in use is selected by ``compute.engine``.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +19,7 @@ from floe.lineage import LINEAGE_COLUMNS, inject_lineage, new_job_run_id
 from floe.models import DynamicTable, RefreshResult
 
 
-class RefreshExecutor:
+class DuckDBExecutor:
     """Executes a DIT refresh: read upstream Iceberg → DuckDB SQL → write Iceberg."""
 
     def __init__(self, catalog_mgr: CatalogManager, all_dits: dict[str, DynamicTable]):
@@ -320,3 +326,8 @@ def strip_lineage_columns(arrow: pa.Table) -> pa.Table:
     """Remove lineage cols (used by tests to compare logical content)."""
     cols = [c for c in arrow.column_names if c not in LINEAGE_COLUMNS]
     return arrow.select(cols)
+
+
+# Back-compat alias: the DuckDB executor was historically the only executor and
+# was named ``RefreshExecutor``. Keep the old name importable.
+RefreshExecutor = DuckDBExecutor

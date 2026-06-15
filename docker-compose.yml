@@ -199,6 +199,30 @@ services:
     entrypoint: ["/opt/floe/run-demo.sh"]
     restart: "no"
 
+  # Long-running Flink SQL Gateway. Floe's `flink` compute engine
+  # (compute.engine: flink) submits each DIT's SQL here over REST; the gateway
+  # runs it on the cluster above and writes the result back into the SAME Iceberg
+  # catalog Floe manages. Floe reaches it at http://localhost:8083 from the host
+  # (or http://flink-sql-gateway:8083 from inside the network).
+  flink-sql-gateway:
+    <<: *flink-image
+    profiles: ["flink"]
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    command:
+      - /opt/flink/bin/sql-gateway.sh
+      - start-foreground
+      - -Dsql-gateway.endpoint.rest.address=0.0.0.0
+      - -Dsql-gateway.endpoint.rest.port=8083
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/v1/info || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   # --- Container observability UI (opt-in) -----------------------------------
   # A lightweight, read-only web dashboard for watching every container in this
   # Compose project in real time: live, searchable logs and CPU / memory / network

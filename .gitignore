@@ -19,6 +19,11 @@ htmlcov/
 venv/
 env/
 
+# Local secrets / environment overrides (use .env.example as the template)
+.env
+.env.*
+!.env.example
+
 # IDE
 .vscode/
 .idea/

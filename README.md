@@ -9,7 +9,7 @@
 
 > *"Don't build the engine. Delete the engine."*
 
-> **Status: v0.1 MVP.** The declarative refresh engine and polling-based event-driven loop both work — define a derived table in SQL with partition windowing and refresh modes, run `floe watch`, and Floe keeps it fresh as its upstreams get new Iceberg snapshots. Data quality routing, preconditions, push-based event hooks (replacing polling), Flink as Floe's compute engine, and multi-cloud deployment profiles are [roadmap](#10-roadmap) items (v0.2+). An opt-in `flink` Compose profile already demonstrates Flink reading and writing the very same Iceberg tables, an interop preview of that compute roadmap, though Floe itself still refreshes tables with DuckDB.
+> **Status: v0.1 MVP.** The declarative refresh engine and polling-based event-driven loop both work — define a derived table in SQL with partition windowing and refresh modes, run `floe watch`, and Floe keeps it fresh as its upstreams get new Iceberg snapshots. The compute engine is pluggable: DuckDB (in-process) is the default, and an opt-in Apache **Flink** engine (`compute.engine: flink`) runs the same refresh on a Flink cluster, writing back to the very same Iceberg tables (unpartitioned, batch, poll-triggered today). Data quality routing, preconditions, push-based event hooks (replacing polling), event-driven **Flink streaming** (the `push` trigger), partitioned Flink refresh, and multi-cloud deployment profiles are [roadmap](#10-roadmap) items (v0.2+).
 
 ![Floe watcher dashboard auto-refreshing downstream DITs as upstream Iceberg tables receive new commits](https://github.com/takasoft/floe/releases/download/demo-latest/demo.gif)
 
@@ -50,13 +50,14 @@ The vision is to bring Snowflake-style Dynamic Tables to Apache Iceberg, without
 - **Partition-windowed incremental refresh** — partitioned tables rewrite only the in-window partitions when upstreams change; unpartitioned tables recompute-and-replace idempotently (true snapshot-diff incremental is on the roadmap)
 - **Full refresh** for complete recomputes
 - **Event-driven refresh via polling** — `floe watch` keeps derived tables fresh as upstream Iceberg tables receive new snapshots
+- **Pluggable compute engine** — refresh in-process with DuckDB (default), or run the same SQL on an Apache **Flink** cluster with `compute.engine: flink` (unpartitioned tables, batch, poll-triggered); Flink writes back to the same open Iceberg tables. Engine (who computes) and trigger (how a refresh starts) are independent axes.
 - **Automatic lineage injection** — every row in a derived table carries `_floe_input_snapshot_id` and `_floe_job_run_id` columns
 - **Stateless workers** — all state lives in Iceberg snapshots; no external state stores
 
 **Roadmap (v0.2 and beyond):**
 
 - **Native push-based event hooks** — Iceberg commit listeners + pluggable Event Bus (NATS, EventBridge, Event Hubs, Pub/Sub) replace the v0.1 polling loop
-- **Flink-based streaming compute** — replaces DuckDB as the production compute layer for streaming workloads and the `TRIGGERED` refresh mode
+- **Flink streaming compute (the `push` trigger)** — the Flink engine already ships for batch, poll-triggered refresh; the roadmap adds long-running streaming jobs that react to upstream commits (event-driven `push`) for low-latency `TRIGGERED` mode, plus partitioned/windowed refresh on Flink
 - **Built-in data quality** — preconditions, quarantine routing, DQ rule enforcement on every write
 - **Cloud-agnostic deployment** — packaged for AWS, Azure, GCP. (v0.1 runs against a local SQLite Iceberg catalog.)
 - **AI-native authoring** — describe a pipeline in plain English; Floe generates the SQL DDL and wires it into the DAG
@@ -133,36 +134,56 @@ The image is configured entirely through `FLOE_*` environment variables (set in
 > bus and worker coordination on the [roadmap](#10-roadmap) (v0.2). Until then
 > Compose is the right fit; Kubernetes is the natural home once those land.
 
-### Experimental: Flink on the same Iceberg tables
+### Flink as a compute engine
 
-Floe writes plain Apache Iceberg tables, so it is not the only engine that can
-read or transform them. An opt-in `flink` Compose profile demonstrates this: it
-brings up a small Apache Flink cluster (JobManager + TaskManager) configured to
-use the **same** Postgres-backed catalog and MinIO warehouse, then runs a Flink
-SQL job that reads a Floe-authored silver table and writes a `gold` rollup back
-into the catalog, where Floe can read it.
+Floe's compute engine is pluggable. The default is **DuckDB** (in-process,
+batch). Opt into **Apache Flink** and Floe submits each table's SQL to a Flink
+cluster over its **SQL Gateway**; Flink computes the result and writes it back
+into the **same** Iceberg catalog and warehouse Floe manages. Because Floe's
+outputs are plain, engine-agnostic Iceberg tables, either engine can read or
+refresh any table.
+
+Engine (*who* computes) and trigger (*how* a refresh starts) are independent axes:
+
+| | `trigger: poll` (pull) | `trigger: push` (streaming) |
+|---|---|---|
+| `engine: duckdb` | ✅ default (v0.1) | — (DuckDB is batch-only) |
+| `engine: flink` | ✅ batch refresh on Flink | 🚧 roadmap (event-driven streaming) |
+
+Select the engine in `floe.yaml` (or via `FLOE_COMPUTE_ENGINE` /
+`FLOE_COMPUTE_TRIGGER` / `FLOE_FLINK_SQL_GATEWAY_URL`):
+
+```yaml
+compute:
+  engine: flink     # duckdb (default) | flink
+  trigger: poll     # poll (default) | push (roadmap; requires engine: flink)
+  flink:
+    sql_gateway_url: http://localhost:8083
+```
+
+Bring the Flink cluster and SQL Gateway up with the opt-in `flink` profile:
 
 ```bash
 # core stack still runs; the flink-* services are added on top
 docker compose --profile flink up --build
-# Flink dashboard: http://localhost:8081
+# Flink dashboard: http://localhost:8081 ; SQL Gateway REST: http://localhost:8083
 ```
 
 | Service | Role |
 |---------|------|
 | `flink-jobmanager` | Flink coordinator; dashboard at http://localhost:8081 |
-| `flink-taskmanager` | Flink worker (executes the SQL job) |
-| `flink-sql` | one-shot: registers Floe's Iceberg catalog and runs `docker/flink/demo.sql` |
+| `flink-taskmanager` | Flink worker (executes the job) |
+| `flink-sql-gateway` | long-running SQL Gateway (REST on :8083); Floe's `flink` engine submits statements here |
+| `flink-sql` | one-shot interop demo: registers Floe's catalog and runs `docker/flink/demo.sql` |
 
-This is a preview of the roadmap's Flink-based compute, **not** a replacement for
-Floe's refresh engine: today Floe still refreshes dynamic tables with DuckDB, and
-`compute.engine` only accepts `duckdb`. The point is to show that Floe's outputs
-are open, engine-agnostic Iceberg tables (DuckDB, Flink, Spark, and Trino can all
-operate on them) rather than a proprietary format. Pinned versions live in
-`docker/flink/Dockerfile` (Flink 2.1, Iceberg 1.11.0). The profile is marked
-experimental: the moving part to watch on first run is interoperability between
-PyIceberg's `SqlCatalog` and Flink's `JdbcCatalog` over the shared Postgres
-backend.
+**Scope today:** the Flink engine handles **unpartitioned** tables with batch
+(`poll`) refresh, mirroring the DuckDB engine's recompute-and-replace semantics
+and the same `_floe_*` lineage columns (it `INSERT OVERWRITE`s an existing table,
+or creates it on first run). Partitioned/windowed tables still use the DuckDB
+engine — a Flink refresh of one raises a clear error — and the streaming `push`
+trigger is on the roadmap. Pinned versions live in `docker/flink/Dockerfile`
+(Flink 2.1, Iceberg 1.11.0); Flink's `JdbcCatalog` and PyIceberg's `SqlCatalog`
+share the one Postgres catalog, so both engines resolve the identical tables.
 
 ### Dashboards and observability
 
@@ -669,7 +690,7 @@ The Event Bus interface is a thin abstraction (`publish(event)`, `subscribe(topi
 
 ### 5.5 Compute Layer (Apache Flink)
 
-> **v0.1 implementation:** DuckDB is the compute engine in v0.1, used for both `INCREMENTAL` and `FULL` refresh modes against the local SQLite Iceberg catalog. Flink integration is v0.2, where it becomes the streaming-first engine for low-latency `TRIGGERED` mode and high-throughput batch workloads. The trade-offs and deployment model below describe the v0.2+ target.
+> **v0.1 implementation:** DuckDB is the default compute engine, used for both `INCREMENTAL` and `FULL` refresh modes. An opt-in **Flink engine** (`compute.engine: flink`) already ships for unpartitioned, batch, poll-triggered refresh, submitting SQL to a Flink SQL Gateway and writing back to the same Iceberg catalog (see [Flink as a compute engine](#flink-as-a-compute-engine)). What remains for v0.2 is the **streaming-first** Flink path below: long-running jobs for low-latency `TRIGGERED` mode, the event-driven `push` trigger, and partitioned/windowed refresh on Flink. The trade-offs and deployment model below describe that v0.2+ target.
 
 Apache Flink is the primary compute engine. It was chosen over Spark/Glue for two reasons:
 
@@ -743,7 +764,8 @@ catalog:
     s3.endpoint: http://localhost:9000   # e.g. MinIO; creds can also come from FLOE_S3_* env
 
 compute:
-  engine: duckdb                         # v0.1 ships DuckDB; Flink is on the roadmap (v0.2)
+  engine: duckdb                         # duckdb (default, in-process) | flink (submit to a Flink cluster)
+  trigger: poll                          # poll (default) | push (roadmap; requires engine: flink)
 
 defaults:
   lag: "5 minutes"
@@ -1017,7 +1039,8 @@ Building the same system yourself requires writing Flink jobs per transformation
 
 ### v0.1 — Foundation
 - [x] Core DIT engine: DAG Planner, Refresh Executor, Catalog Manager
-- [x] DuckDB reference compute backend (Flink moves to v0.2)
+- [x] DuckDB reference compute backend (default, in-process)
+- [x] Pluggable compute engine; opt-in Apache Flink engine for unpartitioned batch refresh (poll-triggered), writing the same Iceberg tables via the Flink SQL Gateway
 - [x] Local deployment against SQLite Iceberg catalog
 - [x] `INCREMENTAL` and `FULL` refresh modes
 - [x] Partition-aware refresh (`PARTITION BY` + `PARTITION_WINDOW` + `PARTITION_FRESHNESS`)
@@ -1027,7 +1050,7 @@ Building the same system yourself requires writing Flink jobs per transformation
 - [x] Docker Compose local stack (MinIO warehouse + Postgres catalog + worker; opt-in Flink, SQL-workbench, and container-UI profiles)
 
 ### v0.2 — Production Compute, Event Bus & Data Quality
-- [ ] Apache Flink compute backend (streaming-first engine, replaces DuckDB for production workloads)
+- [ ] Flink **streaming** engine (event-driven `push` trigger) + partitioned/windowed Flink refresh — the batch Flink engine (poll) already ships in v0.1
 - [ ] Push-based event detection: Iceberg commit listeners + pluggable Event Bus (NATS / EventBridge / Event Hubs / Pub/Sub)
 - [ ] `PRECONDITIONS` DSL (built-in functions + custom Python)
 - [ ] `DQ_RULES` DSL
