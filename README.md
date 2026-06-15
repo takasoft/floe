@@ -9,7 +9,7 @@
 
 > *"Don't build the engine. Delete the engine."*
 
-> **Status: v0.1 MVP.** The declarative refresh engine and polling-based event-driven loop both work — define a derived table in SQL with partition windowing and refresh modes, run `floe watch`, and Floe keeps it fresh as its upstreams get new Iceberg snapshots. Data quality routing, preconditions, push-based event hooks (replacing polling), Flink-based streaming compute, and multi-cloud deployment profiles are [roadmap](#10-roadmap) items (v0.2+).
+> **Status: v0.1 MVP.** The declarative refresh engine and polling-based event-driven loop both work — define a derived table in SQL with partition windowing and refresh modes, run `floe watch`, and Floe keeps it fresh as its upstreams get new Iceberg snapshots. Data quality routing, preconditions, push-based event hooks (replacing polling), Flink as Floe's compute engine, and multi-cloud deployment profiles are [roadmap](#10-roadmap) items (v0.2+). An opt-in `flink` Compose profile already demonstrates Flink reading and writing the very same Iceberg tables, an interop preview of that compute roadmap, though Floe itself still refreshes tables with DuckDB.
 
 ![Floe watcher dashboard auto-refreshing downstream DITs as upstream Iceberg tables receive new commits](https://github.com/takasoft/floe/releases/download/demo-latest/demo.gif)
 
@@ -730,33 +730,30 @@ my-pipeline/
 ### 6.2 Configuration: `floe.yaml`
 
 ```yaml
+# The complete schema the v0.1 loader accepts (see `floe init`). Unknown
+# keys are rejected, so this is the full surface, not a subset.
 project: my-analytics-pipeline
 version: "1.0"
 
 catalog:
-  type: rest                        # rest | nessie | polaris | glue | hive
-  uri: http://localhost:8181
+  type: sql                              # PyIceberg SqlCatalog (SQLite or Postgres JDBC)
+  uri: sqlite:///./.floe/catalog.db      # local; or postgresql+psycopg2://user:pw@host:5432/db
+  warehouse: ./warehouse                 # local path; or s3://my-bucket/wh for object storage
+  properties:                            # extra PyIceberg/FileIO props, merged verbatim
+    s3.endpoint: http://localhost:9000   # e.g. MinIO; creds can also come from FLOE_S3_* env
 
 compute:
-  engine: flink
-  mode: local                       # local | kubernetes | emr | dataproc | hdinsight
-  parallelism: 4
-
-storage:
-  type: s3compatible                # s3compatible | s3 | adls | gcs | local
-  warehouse: s3://my-bucket/warehouse
-  endpoint: http://localhost:9000   # MinIO for local mode
-
-event_bus:
-  type: nats                        # nats | eventbridge | eventhubs | pubsub | kafka
-  uri: nats://localhost:4222
+  engine: duckdb                         # v0.1 ships DuckDB; Flink is on the roadmap (v0.2)
 
 defaults:
   lag: "5 minutes"
-  refresh_mode: incremental
-  on_dq_fail: quarantine
-  lineage: true                     # inject _floe_* columns (default: true, non-optional)
+  refresh_mode: INCREMENTAL              # INCREMENTAL | FULL
+  lineage: true                          # inject _floe_* lineage columns
+
+transformations_dir: transformations
 ```
+
+Credentials and environment-specific locations can be injected at runtime through `FLOE_*` environment variables (12-factor), which is how the bundled Docker Compose stack points the same image at Postgres and MinIO without editing this file. Dedicated top-level `storage` and `event_bus` blocks, and a multi-engine `compute` block (`mode` / `parallelism`), are roadmap (v0.2+).
 
 ### 6.3 Declarative SQL DDL
 
@@ -781,6 +778,8 @@ CREATE DYNAMIC TABLE <catalog>.<database>.<table>
   <select_statement>;
 ```
 
+> **v0.1 implementation:** the parser recognizes `PARTITION BY`, `LAG`, `REFRESH_MODE` (`INCREMENTAL` | `FULL`), `PARTITION_WINDOW`, and `PARTITION_FRESHNESS`. The `PRECONDITIONS`, `DQ_RULES`, `ON_DQ_FAIL`, and `TAGS` clauses, plus the `TRIGGERED` and `SCHEDULED` refresh modes, are roadmap (v0.2+) and are not parsed yet. For working syntax, see `examples/quickstart/transformations/`.
+
 Partition-aware options:
 
 - `PARTITION BY (col)` — output table is created with Iceberg identity partitioning on these columns
@@ -788,6 +787,8 @@ Partition-aware options:
 - `PARTITION_FRESHNESS` — maximum staleness for in-window partitions; a refresh fires if upstream changes OR if this deadline lapses
 
 ### 6.4 Python SDK
+
+> **v0.1 implementation:** the example below is the target SDK. Today `floe` exports `Pipeline`, `DynamicTable`, `RefreshMode`, and `RefreshResult`; the supported entry point is `Pipeline.from_config("floe.yaml")` with `.refresh_all()`, `.refresh_one(name)`, and `.status()`. The `preconditions` and `dq` helpers, `pipeline.register()` / `pipeline.apply()`, and the DQ keyword arguments shown here are roadmap (v0.2+).
 
 ```python
 from floe import Pipeline, DynamicTable, preconditions, dq
