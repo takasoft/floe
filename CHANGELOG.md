@@ -15,7 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over REST, computing the refresh on a Flink cluster and writing back to the same
   Iceberg catalog with identical `_floe_*` lineage columns. Scope today:
   unpartitioned tables, batch, poll-triggered (`INSERT OVERWRITE`, or
-  create-on-first-run); partitioned and streaming-`push` refresh are roadmap.
+  create-on-first-run); partitioned refresh is roadmap.
+- **Streaming push** (`trigger: push` with `compute.engine: flink`): `floe watch`
+  submits one long-running Flink streaming job per table that reads its upstream
+  Iceberg table as a streaming source (every `compute.flink.monitor_interval`) and
+  appends new rows to the output as upstream commits land. Scoped to single-source,
+  append-only transforms; aggregating, multi-source, or partitioned tables raise a
+  clear `StreamingNotSupportedError` and stay on `trigger: poll` (streaming
+  aggregations and joins are roadmap). The streaming source starts from the latest
+  snapshot at submission, so it reacts only to new commits (no backfill or
+  double-count).
 - `compute.trigger` config (`poll` | `push`) that models the refresh trigger as an
   axis independent of the engine, and a long-running `flink-sql-gateway` Compose
   service (REST on :8083) the Flink engine submits to.

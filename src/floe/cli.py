@@ -170,11 +170,14 @@ def watch(
         True, "--ui/--no-ui", help="Show the Rich live dashboard (default) or plain logs"
     ),
 ):
-    """Watch upstream Iceberg tables and refresh dependent DITs when they change.
+    """Watch upstream Iceberg tables and keep dependent DITs fresh.
 
-    Polls the catalog for new snapshots on every external source; when one
-    changes, refreshes all DITs that depend on it (transitively) in
-    topological order. Press Ctrl+C to stop.
+    With `trigger: poll` (default) this polls the catalog for new snapshots on
+    every external source; when one changes, it refreshes all DITs that depend on
+    it (transitively) in topological order, using the configured engine. With
+    `trigger: push` (requires `engine: flink`) it instead submits one long-running
+    Flink streaming job per streamable table that reacts to upstream commits
+    continuously. Press Ctrl+C to stop.
 
     The default UI is a live Rich dashboard showing the DAG, per-table status,
     and a rolling event log. Use --no-ui for plain log-only output (useful
@@ -184,22 +187,9 @@ def watch(
 
     pipeline = Pipeline.from_config(config)
 
-    trigger = pipeline.config.compute.trigger
-    if trigger == "push":
-        # The push (event-driven streaming) runner is the next milestone: a
-        # long-running Flink streaming job per DIT, driven by upstream Iceberg
-        # commits instead of polling. Until it lands, fail clearly rather than
-        # silently falling back to polling.
-        console.print(
-            "[yellow]trigger: push (event-driven Flink streaming) is not yet "
-            "available in this release.[/yellow]"
-        )
-        console.print(
-            "It is the next milestone (the Flink streaming runner). Set "
-            "trigger: poll for now — polling already drives the configured "
-            f"engine ([bold]{pipeline.config.compute.engine}[/bold])."
-        )
-        raise typer.Exit(1)
+    if pipeline.config.compute.trigger == "push":
+        _run_push(pipeline)
+        return
 
     sources = pipeline.planner.external_sources()
     if not sources:
@@ -226,6 +216,76 @@ def watch(
         console.print(f"Polling every {poll_interval}s. Press Ctrl+C to stop.")
         console.print()
         watcher.run()
+
+
+def _run_push(pipeline: Pipeline) -> None:
+    """Start one continuous Flink streaming job per streamable DIT (push trigger).
+
+    Submits the jobs to the Flink cluster, reports which tables stream and which
+    are skipped (not yet supported for streaming), then stays alive until
+    interrupted. The streaming jobs run on the cluster independently of this
+    process, so stopping the command leaves them running.
+    """
+    import signal
+    import threading
+
+    from floe.flink_executor import StreamHandle, StreamingNotSupportedError
+
+    executor = pipeline.executor
+    if not hasattr(executor, "start_stream"):
+        console.print(
+            "[red]trigger: push requires engine: flink.[/red] "
+            "Set compute.engine to flink (and start the `flink` Compose profile)."
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        "[bold]Starting streaming push[/bold] (engine: flink). Submitting one "
+        "continuous Flink job per streamable table:"
+    )
+    started: list[StreamHandle] = []
+    for name in pipeline.planner.topological_order():
+        dit = pipeline.dits[name]
+        try:
+            handle = executor.start_stream(dit)
+        except StreamingNotSupportedError as exc:
+            console.print(f"  [yellow]skip[/yellow] {name}: {exc}")
+            continue
+        started.append(handle)
+        console.print(f"  [green]streaming[/green] {name}  ->  Flink job {handle.job_id}")
+
+    if not started:
+        console.print(
+            "\n[yellow]No streamable tables found.[/yellow] Streaming push currently "
+            "supports single-source, append-only transforms; aggregations and joins use "
+            "trigger: poll (or the duckdb/flink batch engine)."
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        f"\n[bold]{len(started)} streaming job(s) running[/bold] on the Flink cluster "
+        "(dashboard: http://localhost:8081). They keep running on the cluster; press "
+        "Ctrl+C to stop watching (the jobs continue)."
+    )
+    stop = threading.Event()
+
+    def _handle(_signum, _frame):
+        stop.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle)
+        except (ValueError, OSError):
+            pass
+    try:
+        while not stop.wait(5):
+            pass
+    except KeyboardInterrupt:
+        pass
+    console.print(
+        "Stopped watching. Streaming jobs remain on the cluster; cancel them from the "
+        "Flink dashboard (http://localhost:8081) to stop them."
+    )
 
 
 @app.command()

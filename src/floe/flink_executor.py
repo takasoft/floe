@@ -6,26 +6,35 @@ table on Flink and writing the result back into the *same* Iceberg catalog Floe
 manages. The Iceberg tables are plain and engine-agnostic, so a table can be read
 or refreshed by either engine.
 
-Scope (this release): unpartitioned DITs, batch refresh (``trigger: poll``). The
-watcher drives this engine unchanged because it implements the same
-``refresh(dit, *, force=False) -> RefreshResult`` contract as the DuckDB engine.
-Partitioned/windowed DITs and the streaming ``push`` trigger are not yet handled
-here and raise a clear error.
+Scope (this release): unpartitioned DITs. Two execution shapes are supported:
 
-The SQL it generates mirrors the DuckDB engine's recompute-and-replace semantics:
-a full ``INSERT OVERWRITE`` (or ``CREATE TABLE AS SELECT`` for a first run), with
-the four Floe lineage columns appended as SQL literals so the output schema
-matches what the DuckDB engine produces.
+* **Batch refresh** (``trigger: poll``): the watcher drives this engine unchanged
+  because it implements the same ``refresh(dit, *, force=False) -> RefreshResult``
+  contract as the DuckDB engine. A full ``INSERT OVERWRITE`` (or ``CREATE TABLE AS
+  SELECT`` for a first run) recomputes and replaces the table.
+* **Streaming push** (``trigger: push``): :meth:`FlinkExecutor.start_stream`
+  submits one long-running Flink job that reads the upstream Iceberg table as a
+  streaming source and appends new rows to the output as upstream commits land.
+  Scoped to single-upstream, append-only transforms; partitioned, multi-source,
+  or aggregating DITs raise :class:`StreamingNotSupportedError` (use ``poll``).
+
+The four Floe lineage columns are appended as SQL literals in both shapes so the
+output schema matches what the DuckDB engine produces.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
+import sqlglot
+from sqlglot import exp
 
 from floe.lineage import (
     INPUT_SNAPSHOT_COL,
@@ -43,6 +52,19 @@ if TYPE_CHECKING:
 
 class FlinkExecutorError(RuntimeError):
     """Raised when a Flink SQL Gateway statement fails."""
+
+
+class StreamingNotSupportedError(NotImplementedError):
+    """Raised when a DIT's shape is not yet supported by the streaming push engine."""
+
+
+@dataclass
+class StreamHandle:
+    """A submitted Flink streaming job that keeps a DIT fresh continuously."""
+
+    table: str
+    job_id: str | None
+    job_run_id: str
 
 
 class FlinkSQLGatewayClient:
@@ -92,6 +114,26 @@ class FlinkSQLGatewayClient:
 
     def execute(self, session: str, statement: str, *, wait_seconds: float) -> None:
         """Run one statement and block until it finishes (or raise on error)."""
+        self._run(session, statement, wait_seconds=wait_seconds)
+
+    def execute_collect(
+        self, session: str, statement: str, *, wait_seconds: float
+    ) -> list[list[Any]]:
+        """Run one statement, block until it finishes, and return its first result page.
+
+        Used for async DML (``table.dml-sync=false``): a streaming ``INSERT``
+        finishes at *submission* and returns a single row holding the Flink job
+        id, which the caller records to track the running job.
+        """
+        op = self._run(session, statement, wait_seconds=wait_seconds)
+        body = self._request(
+            "GET", f"/v1/sessions/{session}/operations/{op}/result/0?rowFormat=JSON"
+        )
+        results = body.get("results") or {}
+        return [row.get("fields", []) for row in results.get("data", [])]
+
+    def _run(self, session: str, statement: str, *, wait_seconds: float) -> str:
+        """Submit a statement, poll to completion, and return the operation handle."""
         resp = self._request(
             "POST", f"/v1/sessions/{session}/statements", {"statement": statement}
         )
@@ -102,7 +144,7 @@ class FlinkSQLGatewayClient:
                 "GET", f"/v1/sessions/{session}/operations/{op}/status"
             ).get("status")
             if status == "FINISHED":
-                return
+                return op
             if status in {"ERROR", "CANCELED", "CLOSED", "TIMEOUT"}:
                 raise FlinkExecutorError(
                     f"statement failed (status={status}): {self._error_detail(session, op)}\n"
@@ -205,6 +247,67 @@ class FlinkExecutor:
             finished_at=datetime.now(UTC),
         )
 
+    def start_stream(self, dit: DynamicTable) -> StreamHandle:
+        """Submit a long-running Flink streaming job that keeps ``dit`` fresh.
+
+        This is the ``push`` trigger: rather than polling and re-running a batch
+        refresh, Floe submits one continuous Flink job that reads the upstream
+        Iceberg table as a streaming source (monitoring it every
+        ``compute.flink.monitor_interval``) and appends new rows to the output as
+        upstream commits land. The job runs on the cluster independently of Floe.
+
+        Scope (this release): single-upstream, append-only (no aggregation)
+        transforms. Aggregating or multi-source streaming needs an upsert sink
+        with a declared key (or stateful joins) and is on the roadmap; such DITs
+        raise :class:`StreamingNotSupportedError`.
+        """
+        self._assert_streamable(dit)
+
+        catalog_name = self.config.flink_catalog_name()
+        namespace, table = dit.namespace, dit.table_name
+        fq_target = f"{_quote_ident(catalog_name)}.{_quote_ident(namespace)}.{_quote_ident(table)}"
+        job_run_id = new_job_run_id()
+
+        # Lineage with a NULL input snapshot: a streaming job consumes a continuous
+        # series of upstream commits, so no single input snapshot applies.
+        select_sql = self._build_select(dit, None, job_run_id)
+
+        if not self.catalog_mgr.table_exists(dit.name):
+            self.catalog_mgr.ensure_namespace(namespace)
+            self._create_empty_table(catalog_name, namespace, fq_target, select_sql)
+
+        streaming_select = self._inject_streaming_hint(select_sql, dit.upstream_tables[0])
+        job_id = self._submit_streaming_insert(
+            catalog_name, namespace, fq_target, streaming_select
+        )
+        return StreamHandle(table=dit.name, job_id=job_id, job_run_id=job_run_id)
+
+    def _assert_streamable(self, dit: DynamicTable) -> None:
+        if dit.is_partitioned:
+            raise StreamingNotSupportedError(
+                f"streaming push does not yet support partitioned DITs ({dit.name!r}); "
+                "use trigger: poll. Partitioned streaming is on the roadmap."
+            )
+        if len(dit.upstream_tables) != 1:
+            raise StreamingNotSupportedError(
+                f"streaming push currently supports a single upstream source; {dit.name!r} "
+                f"reads {len(dit.upstream_tables)}. Multi-source (join) streaming is on the "
+                "roadmap; use trigger: poll."
+            )
+        try:
+            parsed = sqlglot.parse_one(dit.query, dialect="duckdb")
+        except Exception as exc:  # noqa: BLE001 - surface as a streaming-scope error
+            raise StreamingNotSupportedError(
+                f"could not analyse {dit.name!r} for streaming: {exc}"
+            ) from exc
+        if parsed.find(exp.Group) is not None or parsed.find(exp.AggFunc) is not None:
+            raise StreamingNotSupportedError(
+                f"streaming push currently supports append-only transforms; {dit.name!r} "
+                "aggregates (GROUP BY / aggregate function), which needs an upsert sink with a "
+                "declared key. Use trigger: poll for aggregations; streaming upsert is on the "
+                "roadmap."
+            )
+
     # --- internals ---------------------------------------------------------
 
     def _run_flink_refresh(
@@ -243,28 +346,137 @@ class FlinkExecutor:
         finally:
             self.client.close_session(session)
 
-    def _session_properties(self) -> dict[str, str]:
-        return {
+    def _session_properties(
+        self,
+        mode: str = "batch",
+        *,
+        dml_sync: bool = True,
+        dynamic_options: bool = False,
+        checkpoint_interval: str | None = None,
+    ) -> dict[str, str]:
+        props = {
             "execution.target": "remote",
             "rest.address": self.flink.jobmanager_host,
             "rest.port": str(self.flink.jobmanager_port),
-            "execution.runtime-mode": "batch",
-            "table.dml-sync": "true",
+            "execution.runtime-mode": mode,
+            "table.dml-sync": "true" if dml_sync else "false",
             "parallelism.default": str(self.flink.parallelism),
         }
+        if dynamic_options:
+            props["table.dynamic-table-options.enabled"] = "true"
+        if checkpoint_interval:
+            props["execution.checkpointing.interval"] = checkpoint_interval
+        return props
 
-    def _setup_statements(self) -> list[str]:
+    def _setup_statements(
+        self,
+        mode: str = "batch",
+        *,
+        dml_sync: bool = True,
+        dynamic_options: bool = False,
+        checkpoint_interval: str | None = None,
+    ) -> list[str]:
         # Belt-and-braces: also issue the execution targeting as SET statements so
         # the session reliably submits to the remote cluster regardless of how the
         # gateway interprets create-session properties.
-        return [
+        stmts = [
             "SET 'execution.target' = 'remote'",
             f"SET 'rest.address' = '{self.flink.jobmanager_host}'",
             f"SET 'rest.port' = '{self.flink.jobmanager_port}'",
-            "SET 'execution.runtime-mode' = 'batch'",
-            "SET 'table.dml-sync' = 'true'",
+            f"SET 'execution.runtime-mode' = '{mode}'",
+            f"SET 'table.dml-sync' = '{'true' if dml_sync else 'false'}'",
             f"SET 'parallelism.default' = '{self.flink.parallelism}'",
         ]
+        if dynamic_options:
+            stmts.append("SET 'table.dynamic-table-options.enabled' = 'true'")
+        if checkpoint_interval:
+            # The Iceberg sink only commits on checkpoints, so a streaming job must
+            # checkpoint or it would buffer rows forever and never write output.
+            stmts.append(f"SET 'execution.checkpointing.interval' = '{checkpoint_interval}'")
+        return stmts
+
+    def _create_empty_table(
+        self, catalog_name: str, namespace: str, fq_target: str, select_sql: str
+    ) -> None:
+        """Create the streaming output table (schema only) via a 0-row batch CTAS."""
+        statements = [
+            *self._setup_statements("batch", dml_sync=True),
+            self._create_catalog_statement(catalog_name),
+            f"USE CATALOG {_quote_ident(catalog_name)}",
+            f"CREATE DATABASE IF NOT EXISTS {_quote_ident(namespace)}",
+            f"CREATE TABLE {fq_target} AS\n{select_sql}\nWHERE 1 = 0",
+        ]
+        wait = float(self.flink.statement_timeout_seconds)
+        session = self.client.open_session(self._session_properties("batch", dml_sync=True))
+        try:
+            for stmt in statements:
+                self.client.execute(session, stmt, wait_seconds=wait)
+        finally:
+            self.client.close_session(session)
+
+    def _submit_streaming_insert(
+        self, catalog_name: str, namespace: str, fq_target: str, streaming_select: str
+    ) -> str | None:
+        """Submit the continuous INSERT and return the Flink job id."""
+        ckpt = self.flink.monitor_interval
+        statements = [
+            *self._setup_statements(
+                "streaming", dml_sync=False, dynamic_options=True, checkpoint_interval=ckpt
+            ),
+            self._create_catalog_statement(catalog_name),
+            f"USE CATALOG {_quote_ident(catalog_name)}",
+            f"CREATE DATABASE IF NOT EXISTS {_quote_ident(namespace)}",
+        ]
+        wait = float(self.flink.statement_timeout_seconds)
+        session = self.client.open_session(
+            self._session_properties(
+                "streaming", dml_sync=False, dynamic_options=True, checkpoint_interval=ckpt
+            )
+        )
+        try:
+            for stmt in statements:
+                self.client.execute(session, stmt, wait_seconds=wait)
+            insert = f"INSERT INTO {fq_target}\n{streaming_select}"
+            rows = self.client.execute_collect(session, insert, wait_seconds=wait)
+            return self._extract_job_id(rows)
+        finally:
+            self.client.close_session(session)
+
+    @staticmethod
+    def _extract_job_id(rows: list[list[Any]]) -> str | None:
+        """Pull the 32-char hex Flink job id from an async INSERT's result row."""
+        for row in rows:
+            for field in row:
+                if (
+                    isinstance(field, str)
+                    and len(field) == 32
+                    and all(c in "0123456789abcdef" for c in field)
+                ):
+                    return field
+        if rows and rows[0]:
+            return str(rows[0][0])
+        return None
+
+    def _inject_streaming_hint(self, select_sql: str, upstream: str) -> str:
+        """Attach Iceberg streaming-read OPTIONS to the upstream table reference.
+
+        ``starting-strategy=INCREMENTAL_FROM_LATEST_SNAPSHOT`` means the job reacts
+        only to upstream commits made *after* it starts (clean push semantics), so
+        it neither backfills nor double-counts existing rows.
+        """
+        opts = (
+            "'streaming'='true', "
+            f"'monitor-interval'='{self.flink.monitor_interval}', "
+            "'starting-strategy'='INCREMENTAL_FROM_LATEST_SNAPSHOT'"
+        )
+        hint = f" /*+ OPTIONS({opts}) */"
+        pattern = re.compile(r"\b" + re.escape(upstream) + r"\b")
+        new_sql, n = pattern.subn(upstream + hint, select_sql, count=1)
+        if n == 0:
+            raise StreamingNotSupportedError(
+                f"could not locate upstream {upstream!r} in the query to enable streaming reads"
+            )
+        return new_sql
 
     def _create_catalog_statement(self, catalog_name: str) -> str:
         props = self.config.flink_catalog_properties()
