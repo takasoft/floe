@@ -604,6 +604,42 @@ Floe parses all DIT definitions in a project and builds a directed acyclic graph
 - **Cycle detection** — circular dependencies are rejected at `floe apply` time
 - **Schema change propagation** — upstream schema changes are detected before a refresh runs, not during
 
+The example pipeline in `examples/quickstart` forms the DAG below, rendered straight from the model dependencies (bronze sources flow into silver, silver into gold):
+
+```mermaid
+graph LR
+  subgraph Bronze["Bronze (raw)"]
+    rd[bronze.raw_deliveries]
+    da[bronze.delivery_associates]
+    rt[bronze.routes]
+    rse[bronze.raw_safety_events]
+    dd[bronze.delivery_defects]
+  end
+  subgraph Silver["Silver (enriched)"]
+    de[silver.deliveries_enriched]
+    se[silver.safety_events_enriched]
+  end
+  subgraph Gold["Gold (marts)"]
+    dq[gold.delivery_quality_daily]
+    dp[gold.da_daily_performance]
+    rs[gold.regional_safety_summary]
+    sd[gold.station_daily_summary]
+  end
+  rd --> de
+  da --> de
+  rt --> de
+  rse --> se
+  da --> se
+  de --> dq
+  dd --> dq
+  de --> dp
+  se --> dp
+  se --> rs
+  dp --> sd
+```
+
+Run `floe dag` to print the same dependency graph (as ASCII) for any project.
+
 ---
 
 ## 4. Architecture Overview
