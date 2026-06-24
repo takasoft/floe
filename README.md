@@ -183,6 +183,49 @@ built-in Compose view; if you do run Docker Desktop, its Containers tab already
 shows this Compose project. Dozzle is read-only and stores nothing, so it is safe
 to leave running alongside the stack.
 
+### Inspecting a table
+
+The MinIO console shows the warehouse as raw objects: opaque Parquet data files
+and Iceberg metadata / manifest blobs. That is handy for confirming that files
+and snapshots physically land (MinIO is just a local stand-in for AWS S3, Azure
+ADLS, or GCS), but you cannot read a table or its history from it.
+
+To inspect a table itself, use standard Iceberg tooling rather than anything
+Floe-specific. **PyIceberg ships a `pyiceberg` CLI** (already a Floe dependency)
+that talks to the very same catalog. Point it at the running stack from inside
+the worker container, using the values from your `.env`; the catalog name is the
+`project` from `floe.yaml` (here, `quickstart`):
+
+```bash
+docker compose exec floe-watch bash      # open a shell in the worker container
+
+# inside the container, pointing pyiceberg at the same catalog Floe writes to:
+export PYICEBERG_CATALOG__QUICKSTART__TYPE=sql
+export PYICEBERG_CATALOG__QUICKSTART__URI="postgresql+psycopg2://floe:floe@postgres:5432/floe"
+export PYICEBERG_CATALOG__QUICKSTART__WAREHOUSE="s3://floe-warehouse/wh"
+export PYICEBERG_CATALOG__QUICKSTART__S3__ENDPOINT="http://minio:9000"
+export PYICEBERG_CATALOG__QUICKSTART__S3__ACCESS_KEY_ID=minioadmin
+export PYICEBERG_CATALOG__QUICKSTART__S3__SECRET_ACCESS_KEY=minioadmin
+
+pyiceberg --catalog quickstart list     silver                         # tables in a namespace
+pyiceberg --catalog quickstart describe silver.deliveries_enriched     # schema + current snapshot + full snapshot history
+pyiceberg --catalog quickstart schema   silver.deliveries_enriched     # column types
+pyiceberg --catalog quickstart files    silver.deliveries_enriched     # the Parquet files behind the table
+```
+
+`describe` prints the schema, the current snapshot, and the full list of
+snapshots (every refresh commits one), so it doubles as the table's version
+history and audit trail.
+
+For ad-hoc SQL, row previews, per-snapshot row counts, or time travel, query the
+table with **DuckDB** (also already a dependency; it has a built-in browser UI
+via `duckdb -ui`) through its
+[`iceberg` extension](https://duckdb.org/docs/stable/extensions/iceberg), or
+stand up **Trino** with its Iceberg connector for a shared SQL endpoint exposing
+`$snapshots`, `$history`, and `$files` metadata tables and `FOR VERSION AS OF`
+time travel. All three read the same Iceberg metadata, so no Floe-specific
+tooling is required.
+
 ---
 
 ## Table of Contents
