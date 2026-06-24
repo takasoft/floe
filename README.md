@@ -1,5 +1,10 @@
 # Floe
 
+[![CI](https://github.com/takasoft/floe/actions/workflows/test.yml/badge.svg)](https://github.com/takasoft/floe/actions/workflows/test.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
+
 **The cloud-agnostic, event-driven declarative lakehouse engine built on Apache Iceberg.**
 
 > *"Don't build the engine. Delete the engine."*
