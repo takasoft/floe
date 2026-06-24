@@ -133,6 +133,37 @@ The image is configured entirely through `FLOE_*` environment variables (set in
 > bus and worker coordination on the [roadmap](#10-roadmap) (v0.2). Until then
 > Compose is the right fit; Kubernetes is the natural home once those land.
 
+### Experimental: Flink on the same Iceberg tables
+
+Floe writes plain Apache Iceberg tables, so it is not the only engine that can
+read or transform them. An opt-in `flink` Compose profile demonstrates this: it
+brings up a small Apache Flink cluster (JobManager + TaskManager) configured to
+use the **same** Postgres-backed catalog and MinIO warehouse, then runs a Flink
+SQL job that reads a Floe-authored silver table and writes a `gold` rollup back
+into the catalog, where Floe can read it.
+
+```bash
+# core stack still runs; the flink-* services are added on top
+docker compose --profile flink up --build
+# Flink dashboard: http://localhost:8081
+```
+
+| Service | Role |
+|---------|------|
+| `flink-jobmanager` | Flink coordinator; dashboard at http://localhost:8081 |
+| `flink-taskmanager` | Flink worker (executes the SQL job) |
+| `flink-sql` | one-shot: registers Floe's Iceberg catalog and runs `docker/flink/demo.sql` |
+
+This is a preview of the roadmap's Flink-based compute, **not** a replacement for
+Floe's refresh engine: today Floe still refreshes dynamic tables with DuckDB, and
+`compute.engine` only accepts `duckdb`. The point is to show that Floe's outputs
+are open, engine-agnostic Iceberg tables (DuckDB, Flink, Spark, and Trino can all
+operate on them) rather than a proprietary format. Pinned versions live in
+`docker/flink/Dockerfile` (Flink 2.1, Iceberg 1.11.0). The profile is marked
+experimental: the moving part to watch on first run is interoperability between
+PyIceberg's `SqlCatalog` and Flink's `JdbcCatalog` over the shared Postgres
+backend.
+
 ---
 
 ## Table of Contents

@@ -1,0 +1,5 @@
+# Keep Linux-targeted assets as LF regardless of the host platform, so shell
+# script shebangs and Docker build contexts are never broken by CRLF on Windows.
+*.sh            text eol=lf
+docker/flink/*  text eol=lf
+Dockerfile      text eol=lf

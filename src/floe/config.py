@@ -6,7 +6,13 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Compute engines Floe can run a refresh on today. Flink is available as an
+# experimental, opt-in service that operates on the same Iceberg tables (see the
+# `flink` Docker Compose profile), but native Flink-based refresh is not yet
+# wired into the executor, so it is intentionally not accepted here.
+SUPPORTED_COMPUTE_ENGINES = frozenset({"duckdb"})
 
 
 class CatalogConfig(BaseModel):
@@ -26,6 +32,20 @@ class ComputeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     engine: str = Field(default="duckdb")
+
+    @field_validator("engine")
+    @classmethod
+    def _validate_engine(cls, v: str) -> str:
+        engine = v.strip().lower()
+        if engine not in SUPPORTED_COMPUTE_ENGINES:
+            supported = ", ".join(sorted(SUPPORTED_COMPUTE_ENGINES))
+            raise ValueError(
+                f"unsupported compute engine {v!r}; Floe's refresh engine currently "
+                f"supports: {supported}. Flink can run on the same Iceberg tables via the "
+                "experimental Compose profile (`docker compose --profile flink up`); "
+                "native Flink-based refresh is on the roadmap."
+            )
+        return engine
 
 
 class DefaultsConfig(BaseModel):
