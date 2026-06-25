@@ -2,4 +2,5 @@
 # script shebangs and Docker build contexts are never broken by CRLF on Windows.
 *.sh            text eol=lf
 docker/flink/*  text eol=lf
+docker/trino/catalog/*  text eol=lf
 Dockerfile      text eol=lf
